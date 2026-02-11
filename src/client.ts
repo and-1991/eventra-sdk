@@ -22,7 +22,7 @@ export class FeatureTracker {
     this.maxBatchSize = 10;
 
     this.timer = setInterval(() => {
-      this.flush();
+      void this.flush();
     }, this.flushInterval);
   }
 
@@ -30,7 +30,7 @@ export class FeatureTracker {
     this.queue.push({ name, payload });
 
     if (this.queue.length >= this.maxBatchSize) {
-      this.flush();
+      void this.flush();
     }
   }
 
@@ -56,6 +56,10 @@ export class FeatureTracker {
 
   destroy() {
     clearInterval(this.timer);
-    this.flush();
+    void this.flush();
   }
 }
+
+
+
+
