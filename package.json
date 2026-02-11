@@ -1,0 +1,10 @@
+{
+  "name": "@feature-tracker/sdk",
+  "version": "0.0.1",
+  "private": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  }
+}
