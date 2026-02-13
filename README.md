@@ -1,8 +1,8 @@
 # Feature Tracker SDK
 
-A lightweight TypeScript SDK for tracking feature usage with **near-zero runtime overhead**.
+A lightweight TypeScript SDK for tracking feature usage with near-zero runtime overhead.
 
-Designed for batching, resilience, and minimal allocations.
+Built for batching, resilience, and minimal allocations.
 
 ---
 
@@ -30,35 +30,41 @@ tracker.track('checkout.completed', {
 
 ---
 
-## Built For
+## Design Goals
 
-- batching
-- retries
-- offline buffering
-- low GC pressure
-- O(1) tracking cost
+* minimal CPU overhead
+* low GC pressure
+* batch-first transport
+* retry safety
+* offline tolerance
+
+Tracking should never degrade application performance.
 
 ---
 
 ## Defaults
 
-- flushInterval: 2000ms
-- maxBatchSize: 100
+* flushInterval: 2000ms
+* maxBatchSize: 100
+
+Optimized for real production traffic patterns.
 
 ---
 
 ## Best Practices
 
-✔ Use stable feature names  
-✔ Always send a userId when possible  
-✔ Track behavior — not UI clicks
+✔ Use stable feature names
+✔ Always send a userId when available
+✔ Track behavior — not UI noise
 
 Bad:
+
 ```
 button_clicked
 ```
 
 Good:
+
 ```
 invoice.created
 checkout.completed
@@ -67,11 +73,12 @@ team.invited
 
 ---
 
-## Philosophy
+## Future Direction
 
-Zero-friction analytics.
+* edge runtime support
+* serverless-friendly transport
+* adaptive batching
+* compression
+* automatic backpressure
 
-No heavy config.  
-No runtime drag.
-
-Just tracking.
+The SDK will remain intentionally small — complexity belongs on the server.
