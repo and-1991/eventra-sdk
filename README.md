@@ -1,20 +1,20 @@
 # Feature Tracker SDK
 
-A lightweight TypeScript SDK for tracking feature usage with near-zero runtime overhead.
+A lightweight TypeScript SDK for tracking feature usage across browser and Node runtimes.
 
-Built for batching, resilience, and minimal allocations.
+Designed for batching, resilience, and near-zero performance overhead.
 
 ---
 
 ## Install
 
-```
+```bash
 pnpm add @feature-tracker/sdk
 ```
 
 ---
 
-## Quick Start
+## Quick Start (Browser)
 
 ```ts
 import { FeatureTracker } from '@feature-tracker/sdk';
@@ -30,31 +30,30 @@ tracker.track('checkout.completed', {
 
 ---
 
-## Design Goals
+## Quick Start (Node / NestJS)
 
-* minimal CPU overhead
-* low GC pressure
-* batch-first transport
-* retry safety
-* offline tolerance
-
-Tracking should never degrade application performance.
+```ts
+const tracker = new FeatureTracker({
+  apiKey: process.env.FEATURE_API_KEY,
+  endpoint: 'https://your-domain.com/api/ingest/batch',
+});
+```
 
 ---
 
 ## Defaults
 
-* flushInterval: 2000ms
-* maxBatchSize: 100
-
-Optimized for real production traffic patterns.
+- flushInterval: 2000ms
+- maxBatchSize: 50
+- maxRetries: 3
+- maxQueueSize: 10,000
 
 ---
 
 ## Best Practices
 
-✔ Use stable feature names
-✔ Always send a userId when available
+✔ Use stable feature names  
+✔ Always send userId when available  
 ✔ Track behavior — not UI noise
 
 Bad:
@@ -73,12 +72,21 @@ team.invited
 
 ---
 
-## Future Direction
+## Runtime Support
 
-* edge runtime support
-* serverless-friendly transport
-* adaptive batching
-* compression
-* automatic backpressure
+- Browser (sendBeacon optimized)
+- Node.js
+- Bun
+- Deno (fetch-based)
 
-The SDK will remain intentionally small — complexity belongs on the server.
+---
+
+## Design Principles
+
+- Minimal allocations
+- Batch-first transport
+- Retry safety
+- No heavy dependencies
+- Runtime auto-detection
+
+Complexity belongs on the server.
