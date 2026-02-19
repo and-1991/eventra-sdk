@@ -1,4 +1,10 @@
-import { TrackerOptions, TrackEvent } from "./types";
+import {
+  TrackerOptions,
+  TrackEvent,
+  SdkInfo,
+} from "./types";
+
+/* ---------------- Constants ---------------- */
 
 const DEFAULT_ENDPOINT = "http://localhost:4000/api/ingest/batch";
 const DEFAULT_FLUSH_INTERVAL = 2000;
@@ -6,6 +12,76 @@ const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_MAX_QUEUE = 10_000;
 const DEFAULT_RETRIES = 3;
 const DEFAULT_RETRY_DELAY = 300;
+const SDK_VERSION = "0.1.1";
+
+/* ---------------- Helpers ---------------- */
+
+function getGlobalFetch(): typeof fetch | undefined {
+  if (typeof fetch !== "undefined") {
+    return fetch.bind(globalThis);
+  }
+  return undefined;
+}
+
+function generateUUIDv4(): string {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID();
+  }
+
+  // ultra-rare fallback (не должен происходить в нормальной среде)
+  const rnd = Math.random().toString(16).slice(2);
+  const ts = Date.now().toString(16);
+  return `${ts}-${rnd}`;
+}
+
+function isBrowser(): boolean {
+  return typeof window !== "undefined";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/* ---------------- Leader Election (minimal) ---------------- */
+
+const LEADER_KEY = "__ft_sdk_leader__";
+const LEADER_TTL = 4000;
+
+function tryBecomeLeader(): boolean {
+  if (!isBrowser()) return true;
+
+  try {
+    const now = Date.now();
+    const raw = localStorage.getItem(LEADER_KEY);
+
+    if (!raw) {
+      localStorage.setItem(
+        LEADER_KEY,
+        JSON.stringify({ ts: now })
+      );
+      return true;
+    }
+
+    const parsed = JSON.parse(raw) as { ts: number };
+
+    if (now - parsed.ts > LEADER_TTL) {
+      localStorage.setItem(
+        LEADER_KEY,
+        JSON.stringify({ ts: now })
+      );
+      return true;
+    }
+
+    return false;
+  } catch {
+    return true; // fail-open
+  }
+}
+
+/* ============================================================ */
 
 export class FeatureTracker {
   private apiKey: string;
@@ -15,12 +91,16 @@ export class FeatureTracker {
   private maxQueueSize: number;
   private maxRetries: number;
   private retryBaseDelay: number;
+  private multiTabMode: "independent" | "leader";
 
   private fetchImpl?: typeof fetch;
   private queue: TrackEvent[] = [];
   private timer?: ReturnType<typeof setInterval>;
   private inFlight = false;
   private destroyed = false;
+  private droppedEvents = 0;
+
+  private sdkInfo: SdkInfo;
 
   constructor(options: TrackerOptions) {
     if (!options.apiKey) {
@@ -39,18 +119,23 @@ export class FeatureTracker {
       options.maxRetries ?? DEFAULT_RETRIES;
     this.retryBaseDelay =
       options.retryBaseDelayMs ?? DEFAULT_RETRY_DELAY;
+    this.multiTabMode =
+      options.multiTabMode ?? "independent";
 
     this.fetchImpl =
-      options.fetchImpl ??
-      (typeof fetch !== "undefined"
-        ? fetch.bind(globalThis)
-        : undefined);
+      options.fetchImpl ?? getGlobalFetch();
 
     if (!this.fetchImpl) {
       throw new Error(
         "FeatureTracker: fetch is not available. Provide fetchImpl."
       );
     }
+
+    this.sdkInfo = {
+      name: "feature-tracker-js",
+      version: SDK_VERSION,
+      runtime: this.detectRuntime(),
+    };
 
     if (!options.disableTimer) {
       this.startTimer();
@@ -59,7 +144,11 @@ export class FeatureTracker {
     if (options.autoFlushOnExit !== false) {
       this.setupExitHandlers();
     }
+
+    this.onEventsDropped = options.onEventsDropped;
   }
+
+  private onEventsDropped?: (count: number) => void;
 
   /* ---------------- Public API ---------------- */
 
@@ -71,9 +160,15 @@ export class FeatureTracker {
     }
   ) {
     if (this.destroyed) return;
-    if (this.queue.length >= this.maxQueueSize) return;
+
+    if (this.queue.length >= this.maxQueueSize) {
+      this.droppedEvents++;
+      this.onEventsDropped?.(this.droppedEvents);
+      return;
+    }
 
     this.queue.push({
+      idempotencyKey: generateUUIDv4(),
       name,
       userId: options?.userId,
       properties: options?.properties ?? {},
@@ -90,6 +185,13 @@ export class FeatureTracker {
     if (this.inFlight) return;
     if (this.queue.length === 0) return;
 
+    if (
+      this.multiTabMode === "leader" &&
+      !tryBecomeLeader()
+    ) {
+      return;
+    }
+
     this.inFlight = true;
 
     const batch = this.queue.splice(0, this.queue.length);
@@ -97,7 +199,6 @@ export class FeatureTracker {
     try {
       await this.send(batch);
     } catch {
-      // если ошибка — возвращаем события в очередь
       this.queue.unshift(...batch);
     } finally {
       this.inFlight = false;
@@ -111,16 +212,38 @@ export class FeatureTracker {
 
   /* ---------------- Transport ---------------- */
 
+  private trySendBeacon(payload: string): boolean {
+    if (!isBrowser()) return false;
+
+    try {
+      if (navigator.sendBeacon) {
+        const blob = new Blob([payload], {
+          type: "application/json",
+        });
+        return navigator.sendBeacon(this.endpoint, blob);
+      }
+    } catch {
+      // ignore
+    }
+
+    return false;
+  }
+
   private async send(events: TrackEvent[]) {
-    const payload = {
+    const payload = JSON.stringify({
       sentAt: new Date().toISOString(),
-      sdk: {
-        name: "feature-tracker-js",
-        version: "1.0.0",
-        runtime: this.detectRuntime(),
-      },
+      sdk: this.sdkInfo,
       events,
-    };
+    });
+
+    // beacon fast-path (browser only)
+    if (
+      isBrowser() &&
+      payload.length < 60_000 &&
+      document.visibilityState === "hidden"
+    ) {
+      if (this.trySendBeacon(payload)) return;
+    }
 
     let attempt = 0;
 
@@ -130,13 +253,16 @@ export class FeatureTracker {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-api-key": this.apiKey, // ВАЖНО: header обязателен
+            "x-api-key": this.apiKey,
           },
-          body: JSON.stringify(payload),
+          body: payload,
         });
 
-        if (res.status === 401 || res.status === 403) {
-          console.error("FeatureTracker: Invalid API key");
+        // ❗ DO NOT retry client errors
+        if (res.status >= 400 && res.status < 500) {
+          if (res.status === 401 || res.status === 403) {
+            console.error("FeatureTracker: Invalid API key");
+          }
           return;
         }
 
@@ -152,12 +278,13 @@ export class FeatureTracker {
           throw err;
         }
 
+        const jitter = 0.5 + Math.random(); // 0.5–1.5
         const delay =
-          this.retryBaseDelay * 2 ** (attempt - 1);
+          this.retryBaseDelay *
+          2 ** (attempt - 1) *
+          jitter;
 
-        await new Promise((r) =>
-          setTimeout(r, delay)
-        );
+        await sleep(delay);
       }
     }
   }
@@ -165,9 +292,7 @@ export class FeatureTracker {
   /* ---------------- Runtime ---------------- */
 
   private detectRuntime(): string {
-    if (typeof window !== "undefined") {
-      return "browser";
-    }
+    if (typeof window !== "undefined") return "browser";
 
     const g = globalThis as Record<string, unknown>;
 
@@ -178,9 +303,7 @@ export class FeatureTracker {
       | { versions?: { node?: string } }
       | undefined;
 
-    if (maybeProcess?.versions?.node) {
-      return "node";
-    }
+    if (maybeProcess?.versions?.node) return "node";
 
     return "unknown";
   }
@@ -196,7 +319,7 @@ export class FeatureTracker {
   /* ---------------- Exit handling ---------------- */
 
   private setupExitHandlers() {
-    // Browser flush on tab hide
+    // browser
     if (typeof window !== "undefined") {
       window.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "hidden") {
@@ -205,7 +328,7 @@ export class FeatureTracker {
       });
     }
 
-    // Node graceful shutdown (без @types/node)
+    // node
     const g = globalThis as Record<string, unknown>;
 
     const maybeProcess = g["process"] as
@@ -225,3 +348,5 @@ export class FeatureTracker {
     }
   }
 }
+
+export * from "./types";

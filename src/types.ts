@@ -1,4 +1,3 @@
-
 export interface TrackerOptions {
   apiKey: string;
   endpoint?: string;
@@ -10,11 +9,24 @@ export interface TrackerOptions {
   fetchImpl?: typeof fetch;
   autoFlushOnExit?: boolean;
   disableTimer?: boolean;
+
+  /** Called when events are dropped due to queue overflow */
+  onEventsDropped?: (count: number) => void;
+
+  /** Multi-tab mode (browser only) */
+  multiTabMode?: "independent" | "leader";
 }
 
 export interface TrackEvent {
+  idempotencyKey: string;
   name: string;
   userId?: string;
   properties?: Record<string, unknown>;
-  timestamp?: string;
+  timestamp: string;
+}
+
+export interface SdkInfo {
+  name: string;
+  version: string;
+  runtime: string;
 }
