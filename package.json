@@ -1,5 +1,5 @@
 {
-  "name": "@feature-tracker/sdk",
+  "name": "@eventra/sdk",
   "version": "0.1.1",
   "private": false,
   "main": "dist/index.mjs",
