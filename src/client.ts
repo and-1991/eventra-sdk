@@ -6,13 +6,20 @@ import {
 
 /* ---------------- Constants ---------------- */
 
-const DEFAULT_ENDPOINT = "http://localhost:4000/api/ingest/batch";
-const DEFAULT_FLUSH_INTERVAL = 2000;
-const DEFAULT_BATCH_SIZE = 50;
-const DEFAULT_MAX_QUEUE = 10_000;
-const DEFAULT_RETRIES = 3;
-const DEFAULT_RETRY_DELAY = 300;
-const SDK_VERSION = "0.1.1";
+
+declare const __SDK_VERSION__: string;
+declare const __EVENTRA_ENDPOINT__: string | undefined;
+
+const SDK_VERSION = __SDK_VERSION__;
+
+const DEFAULTS = {
+  endpoint: __EVENTRA_ENDPOINT__ ?? "",
+  flushInterval: 2000,
+  maxBatchSize: 50,
+  maxQueueSize: 10_000,
+  maxRetries: 3,
+  retryBaseDelay: 300,
+};
 
 /* ---------------- Helpers ---------------- */
 
@@ -47,7 +54,7 @@ function sleep(ms: number): Promise<void> {
 
 /* ---------------- Leader Election (minimal) ---------------- */
 
-const LEADER_KEY = "__ft_sdk_leader__";
+const LEADER_KEY = "__eventra_sdk_leader__";
 const LEADER_TTL = 4000;
 
 function tryBecomeLeader(): boolean {
@@ -83,7 +90,7 @@ function tryBecomeLeader(): boolean {
 
 /* ============================================================ */
 
-export class FeatureTracker {
+export class Eventra {
   private apiKey: string;
   private endpoint: string;
   private flushInterval: number;
@@ -104,21 +111,31 @@ export class FeatureTracker {
 
   constructor(options: TrackerOptions) {
     if (!options.apiKey) {
-      throw new Error("FeatureTracker: apiKey is required");
+      throw new Error("Eventra: apiKey is required");
     }
 
     this.apiKey = options.apiKey;
-    this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
+
+    this.endpoint = options.endpoint ?? DEFAULTS.endpoint ?? "";
+    if (!this.endpoint) {
+      throw new Error("Eventra: endpoint is not configured");
+    }
+
     this.flushInterval =
-      options.flushInterval ?? DEFAULT_FLUSH_INTERVAL;
+      options.flushInterval ?? DEFAULTS.flushInterval;
+
     this.maxBatchSize =
-      options.maxBatchSize ?? DEFAULT_BATCH_SIZE;
+      options.maxBatchSize ?? DEFAULTS.maxBatchSize;
+
     this.maxQueueSize =
-      options.maxQueueSize ?? DEFAULT_MAX_QUEUE;
+      options.maxQueueSize ?? DEFAULTS.maxQueueSize;
+
     this.maxRetries =
-      options.maxRetries ?? DEFAULT_RETRIES;
+      options.maxRetries ?? DEFAULTS.maxRetries;
+
     this.retryBaseDelay =
-      options.retryBaseDelayMs ?? DEFAULT_RETRY_DELAY;
+      options.retryBaseDelayMs ?? DEFAULTS.retryBaseDelay;
+
     this.multiTabMode =
       options.multiTabMode ?? "independent";
 
@@ -127,12 +144,12 @@ export class FeatureTracker {
 
     if (!this.fetchImpl) {
       throw new Error(
-        "FeatureTracker: fetch is not available. Provide fetchImpl."
+        "Eventra: fetch is not available. Provide fetchImpl."
       );
     }
 
     this.sdkInfo = {
-      name: "feature-tracker-js",
+      name: "@eventra/sdk",
       version: SDK_VERSION,
       runtime: this.detectRuntime(),
     };
@@ -261,7 +278,7 @@ export class FeatureTracker {
         // ❗ DO NOT retry client errors
         if (res.status >= 400 && res.status < 500) {
           if (res.status === 401 || res.status === 403) {
-            console.error("FeatureTracker: Invalid API key");
+            console.error("Eventra: Invalid API key");
           }
           return;
         }
