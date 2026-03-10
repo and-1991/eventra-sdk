@@ -124,7 +124,7 @@ It does **not retry**:
 ### Backoff Strategy
 
 ```
-delay = base * 2^attempt * jitter(0.5–1.5)
+delay = base * 2^attempt * jitter(0.5–1.5) 
 ```
 
 ---
