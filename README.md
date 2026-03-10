@@ -8,6 +8,7 @@ Designed for **deterministic ingestion**, batching efficiency, and near-zero ove
 
 ## ✨ What’s New (Hardening)
 
+
 This SDK is aligned with the Feature Tracker ingestion guarantees:
 
 * ✅ UUID v4 idempotency keys (client-generated)
