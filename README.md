@@ -9,9 +9,10 @@ Eventra SDK allows you to send **feature usage and product analytics events** to
 It is designed to be:
 
 * lightweight
-* runtime-agnostic (Node.js / Browser / Bun / Deno)
+* runtime-agnostic
 * resilient (batching + retry)
 * production-safe
+* TypeScript-first
 
 ---
 
@@ -44,74 +45,31 @@ yarn add @eventra_dev/eventra-sdk
 ```ts
 import { Eventra } from "@eventra_dev/eventra-sdk";
 
-const eventra = new Eventra({
-  apiKey: "your-api-key",
-  endpoint: "https://api.eventra.dev/api/v1/events"
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
 });
 
-eventra.track("user_signup", {
+tracker.track("checkout.completed", {
   userId: "user_123",
-  properties: {
-    plan: "pro"
-  }
 });
 ```
 
 ---
 
-# Basic Usage
+# Where You Can Use Eventra SDK
 
-```ts
-import { Eventra } from "@eventra_dev/eventra-sdk";
+Eventra SDK works in many environments:
 
-const client = new Eventra({
-  apiKey: "your-api-key",
-  endpoint: "https://api.eventra.dev/api/v1/events"
-});
-
-client.track("project_created", {
-  userId: "user_1",
-  properties: {
-    projectId: "proj_123"
-  }
-});
-```
-
-Events are automatically:
-
-* batched
-* retried
-* flushed periodically
-
----
-
-# Configuration
-
-You can configure the SDK behaviour:
-
-```ts
-const eventra = new Eventra({
-  apiKey: "your-api-key",
-
-  endpoint: "https://api.eventra.dev/api/v1/events",
-
-  flushInterval: 2000,
-  maxBatchSize: 50,
-  maxQueueSize: 10000,
-  maxRetries: 3
-});
-```
-
-### Options
-
-| option        | description                        |
-| ------------- | ---------------------------------- |
-| apiKey        | Project API key                    |
-| endpoint      | Event ingestion endpoint           |
-| flushInterval | Batch flush interval (ms)          |
-| maxBatchSize  | Maximum events per batch           |
-| maxQueueSize  | Maximum buffered events            |
-| maxRetries    | Retry attempts for failed requests |
+* Browser applications
+* React apps
+* Next.js apps
+* Node.js backends
+* NestJS services
+* Express APIs
+* Vanilla JavaScript
+* Edge runtimes
+* Bun
+* Deno
 
 ---
 
@@ -120,12 +78,11 @@ const eventra = new Eventra({
 ```ts
 import { Eventra } from "@eventra_dev/eventra-sdk";
 
-const eventra = new Eventra({
-  apiKey: "public-api-key",
-  endpoint: "https://api.eventra.dev/api/v1/events"
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
 });
 
-eventra.track("page_view", {
+tracker.track("page.viewed", {
   properties: {
     path: window.location.pathname
   }
@@ -140,32 +97,177 @@ The SDK automatically:
 
 ---
 
+# React Usage
+
+```ts
+import { useEffect } from "react";
+import { Eventra } from "@eventra_dev/eventra-sdk";
+
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
+});
+
+export function App() {
+
+  useEffect(() => {
+    tracker.track("app.loaded");
+  }, []);
+
+  return <div>Hello</div>;
+}
+```
+
+---
+
+# Next.js Usage
+
+Client component example:
+
+```ts
+"use client";
+
+import { Eventra } from "@eventra_dev/eventra-sdk";
+
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
+});
+
+export function CheckoutButton() {
+  return (
+    <button
+      onClick={() => tracker.track("checkout.started")}
+    >
+      Checkout
+    </button>
+  );
+}
+```
+
+---
+
 # Node.js Usage
 
 ```ts
 import { Eventra } from "@eventra_dev/eventra-sdk";
 
-const eventra = new Eventra({
-  apiKey: process.env.EVENTRA_API_KEY!,
-  endpoint: "https://api.eventra.dev/api/v1/events"
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
 });
 
-eventra.track("job_completed", {
-  properties: {
-    duration: 120
-  }
+tracker.track("invoice.created", {
+  userId: "user_123",
 });
 ```
 
 ---
 
-# Multi-tab Mode (Browser)
+# NestJS Usage
 
-To avoid duplicate event sending across multiple tabs you can enable leader mode:
+```ts
+import { Injectable } from "@nestjs/common";
+import { Eventra } from "@eventra_dev/eventra-sdk";
+
+@Injectable()
+export class BillingService {
+
+  private tracker = new Eventra({
+    apiKey: "YOUR_PROJECT_API_KEY",
+  });
+
+  charge(userId: string) {
+    this.tracker.track("invoice.created", {
+      userId
+    });
+  }
+}
+```
+
+---
+
+# Express Usage
+
+```ts
+import express from "express";
+import { Eventra } from "@eventra_dev/eventra-sdk";
+
+const app = express();
+
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
+});
+
+app.post("/checkout", (req, res) => {
+
+  tracker.track("checkout.completed");
+
+  res.sendStatus(200);
+});
+```
+
+---
+
+# Vanilla JavaScript (CDN)
+
+You can use Eventra without a bundler.
+
+```html
+<script type="module">
+
+import { Eventra } from "https://esm.sh/@eventra_dev/eventra-sdk";
+
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
+});
+
+tracker.track("page.viewed");
+
+</script>
+```
+
+---
+
+# Configuration
+
+You can configure the SDK behaviour.
 
 ```ts
 const eventra = new Eventra({
-  apiKey: "your-api-key",
+
+  apiKey: "YOUR_PROJECT_API_KEY",
+
+  endpoint: "https://api.eventra.dev/api/v1/events",
+
+  flushInterval: 2000,
+  maxBatchSize: 50,
+  maxQueueSize: 10000,
+  maxRetries: 3
+
+});
+```
+
+---
+
+# Options
+
+| option        | description                        |
+| ------------- | ---------------------------------- |
+| apiKey        | Project API key                    |
+| endpoint      | Event ingestion endpoint           |
+| flushInterval | Batch flush interval (ms)          |
+| maxBatchSize  | Maximum events per batch           |
+| maxQueueSize  | Maximum buffered events            |
+| maxRetries    | Retry attempts for failed requests |
+| multiTabMode  | Browser tab coordination mode      |
+
+---
+
+# Multi-Tab Mode (Browser)
+
+To avoid duplicate event sending across multiple tabs:
+
+```ts
+const tracker = new Eventra({
+  apiKey: "YOUR_PROJECT_API_KEY",
   multiTabMode: "leader"
 });
 ```
@@ -176,10 +278,8 @@ Only one tab will send events.
 
 # Manual Flush
 
-You can flush the queue manually:
-
 ```ts
-await eventra.flush();
+await tracker.flush();
 ```
 
 ---
@@ -187,7 +287,7 @@ await eventra.flush();
 # Shutdown / Cleanup
 
 ```ts
-eventra.destroy();
+tracker.destroy();
 ```
 
 Stops timers and prevents further event sending.
@@ -196,13 +296,14 @@ Stops timers and prevents further event sending.
 
 # Runtime Support
 
-The SDK works in:
+Eventra SDK works in:
 
 * Node.js
 * Browser
 * Bun
 * Deno
 * Edge runtimes
+* Serverless environments
 
 ---
 
@@ -234,7 +335,8 @@ Events are sent in batches:
 # Error Handling
 
 Client errors (4xx) are **not retried**.
-Server errors (5xx) are retried with **exponential backoff**.
+
+Server errors (5xx) are retried using **exponential backoff**.
 
 ---
 
