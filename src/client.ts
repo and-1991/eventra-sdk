@@ -38,7 +38,7 @@ function generateUUIDv4(): string {
     return crypto.randomUUID();
   }
 
-  // ultra-rare fallback (не должен происходить в нормальной среде)
+  // ultra-rare fallback
   const rnd = Math.random().toString(16).slice(2);
   const ts = Date.now().toString(16);
   return `${ts}-${rnd}`;
@@ -149,7 +149,7 @@ export class Eventra {
     }
 
     this.sdkInfo = {
-      name: "@eventra/sdk",
+      name: "@eventra_dev/eventra-sdk",
       version: SDK_VERSION,
       runtime: this.detectRuntime(),
     };
