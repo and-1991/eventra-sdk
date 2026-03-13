@@ -153,7 +153,7 @@ One tab becomes the sender and reduces duplicate traffic.
 # Architecture
 
 ```
-Application
+ Application
      │
      ▼
  Eventra SDK
