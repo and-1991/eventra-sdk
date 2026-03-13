@@ -1,13 +1,11 @@
 {
   "name": "@eventra/sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "publishConfig": {
     "access": "public"
   },
-
   "type": "module",
-
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -15,19 +13,16 @@
       "require": "./dist/index.js"
     }
   },
-
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
-
-  "files": ["dist"],
-
+  "files": [
+    "dist"
+  ],
   "sideEffects": false,
-
   "scripts": {
     "build": "tsup",
     "clean": "rm -rf dist"
   },
-
   "repository": {
     "type": "git",
     "url": "https://github.com/and-1991/eventra-sdk"
