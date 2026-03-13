@@ -32,6 +32,6 @@ jobs:
           EVENTRA_ENDPOINT: ${{ secrets.EVENTRA_ENDPOINT }}
 
       - name: Publish to npm
-        run: npm publish --access public
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

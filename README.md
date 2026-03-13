@@ -11,7 +11,7 @@ Eventra is designed for **deterministic ingestion**, batching efficiency, and ne
 
 ---
 
-## ✨ Features
+##  Features
 
 - UUID v4 idempotency keys
 - Safe retry policy
@@ -24,7 +24,7 @@ Eventra is designed for **deterministic ingestion**, batching efficiency, and ne
 
 ---
 
-## 📦 Install
+## Install
 
 ```bash
 pnpm add @eventra/sdk
@@ -38,7 +38,7 @@ npm install @eventra/sdk
 
 ---
 
-# 🚀 Quick Start
+#  Quick Start
 
 ## Browser
 
@@ -72,7 +72,7 @@ tracker.track("invoice.created", {
 
 ---
 
-# ⚙️ Configuration
+#  Configuration
 
 | Option | Default |
 |------|------|
@@ -94,7 +94,7 @@ const tracker = new Eventra({
 
 ---
 
-# 🧠 Reliability Model
+# Reliability Model
 
 ### Idempotency
 
@@ -129,7 +129,7 @@ delay = base * 2^attempt * jitter(0.5–1.5)
 
 ---
 
-# 🧵 Multi-Tab Mode
+# Multi-Tab Mode
 
 Default:
 
@@ -150,7 +150,7 @@ One tab becomes the sender and reduces duplicate traffic.
 
 ---
 
-# 🏗 Architecture
+# Architecture
 
 ```
 Application
@@ -171,7 +171,7 @@ Application
 
 ---
 
-# 🎯 Best Practices
+# Best Practices
 
 Use semantic event names.
 
@@ -192,6 +192,6 @@ modal_opened
 
 ---
 
-# 📄 License
+# License
 
 MIT
