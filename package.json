@@ -1,6 +1,6 @@
 {
   "name": "@eventra_dev/eventra-sdk",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -32,6 +32,7 @@
     "tsup": "^8.0.0",
     "typescript": "^5.6.0"
   },
+  "license": "MIT",
   "engines": {
     "node": ">=18"
   }
