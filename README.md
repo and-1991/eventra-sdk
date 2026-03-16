@@ -234,9 +234,7 @@ You can configure the SDK behaviour.
 const eventra = new Eventra({
 
   apiKey: "YOUR_PROJECT_API_KEY",
-
-  endpoint: "https://api.eventra.dev/api/v1/events",
-
+  endpoint: "IF YOU NEED SOMETHING DIFFERENT",
   flushInterval: 2000,
   maxBatchSize: 50,
   maxQueueSize: 10000,
@@ -316,7 +314,7 @@ Events are sent in batches:
   "sentAt": "2026-03-12T10:00:00Z",
   "sdk": {
     "name": "@eventra_dev/eventra-sdk",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "runtime": "node"
   },
   "events": [
