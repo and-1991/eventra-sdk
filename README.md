@@ -6,6 +6,14 @@
 
 Eventra SDK allows you to send **feature usage and product analytics events** to the Eventra platform.
 
+Eventra helps you:
+
+- Track feature adoption
+- Detect unused features
+- Understand user behavior
+- Monitor backend usage
+- Analyze product growth
+
 It is designed to be:
 
 * lightweight
@@ -51,6 +59,94 @@ const tracker = new Eventra({
 
 tracker.track("checkout.completed", {
   userId: "user_123",
+});
+```
+
+That's it. Events are automatically:
+
+- batched
+- retried
+- flushed
+
+---
+
+# Event Properties
+
+Eventra allows you to pass **optional properties** with every event.
+
+Properties are completely flexible — you can send **any JSON-compatible data**.
+
+```ts
+tracker.track("checkout.completed", {
+  userId: "user_123",
+  properties: {
+    plan: "pro",
+    price: 29,
+    currency: "USD"
+  }
+});
+```
+
+Properties are optional:
+
+```ts
+tracker.track("app.loaded");
+```
+
+Or with userId only:
+
+```ts
+tracker.track("user.login", {
+  userId: "user_123"
+});
+```
+
+---
+
+# Common Examples
+
+## Feature Usage
+
+```ts
+tracker.track("feature.used", {
+  userId: "user_123",
+  properties: {
+    feature: "dashboard",
+    section: "analytics"
+  }
+});
+```
+
+## Page View
+
+```ts
+tracker.track("page.viewed", {
+  properties: {
+    path: window.location.pathname
+  }
+});
+```
+
+## API Usage
+
+```ts
+tracker.track("api.request", {
+  properties: {
+    endpoint: "/checkout",
+    method: "POST",
+    status: 200
+  }
+});
+```
+
+## Error Tracking
+
+```ts
+tracker.track("error.occurred", {
+  properties: {
+    message: "Payment failed",
+    code: "PAYMENT_ERROR"
+  }
 });
 ```
 
@@ -208,8 +304,6 @@ app.post("/checkout", (req, res) => {
 
 # Vanilla JavaScript (CDN)
 
-You can use Eventra without a bundler.
-
 ```html
 <script type="module">
 
@@ -227,8 +321,6 @@ tracker.track("page.viewed");
 ---
 
 # Configuration
-
-You can configure the SDK behaviour.
 
 ```ts
 const eventra = new Eventra({
@@ -260,8 +352,6 @@ const eventra = new Eventra({
 ---
 
 # Multi-Tab Mode (Browser)
-
-To avoid duplicate event sending across multiple tabs:
 
 ```ts
 const tracker = new Eventra({
@@ -327,14 +417,6 @@ Events are sent in batches:
   ]
 }
 ```
-
----
-
-# Error Handling
-
-Client errors (4xx) are **not retried**.
-
-Server errors (5xx) are retried using **exponential backoff**.
 
 ---
 
