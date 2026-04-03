@@ -404,7 +404,7 @@ Events are sent in batches:
   "sentAt": "2026-03-12T10:00:00Z",
   "sdk": {
     "name": "@eventra_dev/eventra-sdk",
-    "version": "0.1.10",
+    "version": "1.0.2",
     "runtime": "node"
   },
   "events": [
