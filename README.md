@@ -1,28 +1,38 @@
+```{=html}
+<p align="center">
+```
+`<img src="https://eventra.dev/eventra-icon-animated.svg" width="120" />`{=html}
+```{=html}
+</p>
+```
 # Eventra SDK
 
-[![npm version](https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
-[![npm downloads](https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
+[![npm
+version](https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
+[![npm
+downloads](https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
 [![TypeScript](https://img.shields.io/badge/typescript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Eventra SDK allows you to send **feature usage and product analytics events** to the Eventra platform.
+Eventra SDK allows you to send **feature usage and product analytics
+events** to the Eventra platform.
 
 Eventra helps you:
 
-- Track feature adoption
-- Detect unused features
-- Understand user behavior
-- Monitor backend usage
-- Analyze product growth
+-   Track feature adoption
+-   Detect unused features
+-   Understand user behavior
+-   Monitor backend usage
+-   Analyze product growth
 
 It is designed to be:
 
-* lightweight
-* runtime-agnostic
-* resilient (batching + retry)
-* production-safe
-* TypeScript-first
+-   lightweight
+-   runtime-agnostic
+-   resilient (batching + retry)
+-   production-safe
+-   TypeScript-first
 
----
+------------------------------------------------------------------------
 
 # Installation
 
@@ -30,27 +40,27 @@ Install the SDK using your preferred package manager.
 
 ### npm
 
-```bash
+``` bash
 npm i @eventra_dev/eventra-sdk
 ```
 
 ### pnpm
 
-```bash
+``` bash
 pnpm add @eventra_dev/eventra-sdk
 ```
 
 ### yarn
 
-```bash
+``` bash
 yarn add @eventra_dev/eventra-sdk
 ```
 
----
+------------------------------------------------------------------------
 
 # Quick Start
 
-```ts
+``` ts
 import { Eventra } from "@eventra_dev/eventra-sdk";
 
 const tracker = new Eventra({
@@ -64,11 +74,11 @@ tracker.track("checkout.completed", {
 
 That's it. Events are automatically:
 
-- batched
-- retried
-- flushed
+-   batched
+-   retried
+-   flushed
 
----
+------------------------------------------------------------------------
 
 # Event Properties
 
@@ -101,7 +111,7 @@ tracker.track("user.login", {
 });
 ```
 
----
+------------------------------------------------------------------------
 
 # Common Examples
 
@@ -150,7 +160,7 @@ tracker.track("error.occurred", {
 });
 ```
 
----
+------------------------------------------------------------------------
 
 # Where You Can Use Eventra SDK
 
@@ -167,7 +177,7 @@ Eventra SDK works in many environments:
 * Bun
 * Deno
 
----
+------------------------------------------------------------------------
 
 # Browser Usage
 
@@ -191,7 +201,7 @@ The SDK automatically:
 * retries failed requests
 * flushes on page exit
 
----
+------------------------------------------------------------------------
 
 # React Usage
 
@@ -213,7 +223,7 @@ export function App() {
 }
 ```
 
----
+------------------------------------------------------------------------
 
 # Next.js Usage
 
@@ -239,7 +249,7 @@ export function CheckoutButton() {
 }
 ```
 
----
+------------------------------------------------------------------------
 
 # Node.js Usage
 
@@ -255,7 +265,7 @@ tracker.track("invoice.created", {
 });
 ```
 
----
+------------------------------------------------------------------------
 
 # NestJS Usage
 
@@ -278,7 +288,7 @@ export class BillingService {
 }
 ```
 
----
+------------------------------------------------------------------------
 
 # Express Usage
 
@@ -300,7 +310,7 @@ app.post("/checkout", (req, res) => {
 });
 ```
 
----
+------------------------------------------------------------------------
 
 # Vanilla JavaScript (CDN)
 
@@ -318,7 +328,7 @@ tracker.track("page.viewed");
 </script>
 ```
 
----
+------------------------------------------------------------------------
 
 # Configuration
 
@@ -335,7 +345,7 @@ const eventra = new Eventra({
 });
 ```
 
----
+------------------------------------------------------------------------
 
 # Options
 
@@ -349,7 +359,7 @@ const eventra = new Eventra({
 | maxRetries    | Retry attempts for failed requests |
 | multiTabMode  | Browser tab coordination mode      |
 
----
+------------------------------------------------------------------------
 
 # Multi-Tab Mode (Browser)
 
@@ -370,7 +380,7 @@ Only one tab will send events.
 await tracker.flush();
 ```
 
----
+------------------------------------------------------------------------
 
 # Shutdown / Cleanup
 
@@ -380,7 +390,7 @@ tracker.destroy();
 
 Stops timers and prevents further event sending.
 
----
+------------------------------------------------------------------------
 
 # Runtime Support
 
@@ -393,7 +403,7 @@ Eventra SDK works in:
 * Edge runtimes
 * Serverless environments
 
----
+------------------------------------------------------------------------
 
 # Event Format
 
@@ -418,7 +428,7 @@ Events are sent in batches:
 }
 ```
 
----
+------------------------------------------------------------------------
 
 # Documentation
 
@@ -426,7 +436,7 @@ Full documentation:
 
 https://eventra.dev/docs
 
----
+------------------------------------------------------------------------
 
 # License
 
