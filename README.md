@@ -1,10 +1,7 @@
-```{=html}
 <p align="center">
-```
-`<img src="https://eventra.dev/eventra-icon-animated.svg" width="120" />`{=html}
-```{=html}
+<img src="https://eventra.dev/eventra-icon-animated.svg" width="120">
 </p>
-```
+
 # Eventra SDK
 
 [![npm
