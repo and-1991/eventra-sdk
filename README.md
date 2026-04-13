@@ -4,11 +4,10 @@
 
 # Eventra SDK
 
-[![npm
-version](https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
-[![npm
-downloads](https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
+[![npm version](https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
+[![npm downloads](https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
 [![TypeScript](https://img.shields.io/badge/typescript-ready-blue.svg)](https://www.typescriptlang.org/)
+[![License](https://img.shields.io/npm/l/@eventra_dev/eventra-sdk)]()
 
 Eventra SDK allows you to send **feature usage and product analytics
 events** to the Eventra platform.
