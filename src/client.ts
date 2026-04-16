@@ -309,18 +309,48 @@ export class Eventra {
   /* ---------------- Runtime ---------------- */
 
   private detectRuntime(): string {
-    if (typeof window !== "undefined") return "browser";
-
     const g = globalThis as Record<string, unknown>;
 
+    // Edge (Vercel)
+    if (typeof g["EdgeRuntime"] !== "undefined") {
+      return "edge-vercel";
+    }
+
+    // Cloudflare Workers
+    if (
+      typeof g["WebSocketPair"] !== "undefined" &&
+      typeof g["caches"] !== "undefined"
+    ) {
+      return "edge-cloudflare";
+    }
+
+    // Deno
     if (g["Deno"]) return "deno";
+
+    // Bun
     if (g["Bun"]) return "bun";
 
+    // Browser (window)
+    if (typeof window !== "undefined") {
+      return "browser";
+    }
+
+    // Web Worker / Service Worker
+    if (
+      typeof self !== "undefined" &&
+      typeof window === "undefined"
+    ) {
+      return "worker";
+    }
+
+    // Node
     const maybeProcess = g["process"] as
       | { versions?: { node?: string } }
       | undefined;
 
-    if (maybeProcess?.versions?.node) return "node";
+    if (maybeProcess?.versions?.node) {
+      return "node";
+    }
 
     return "unknown";
   }
