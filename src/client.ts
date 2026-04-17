@@ -1,222 +1,202 @@
-import {
-  TrackerOptions,
-  TrackEvent,
-  SdkInfo,
-} from "./types";
+import { TrackerOptions, TrackEvent, SdkInfo } from "./types";
 
-/* ---------------- Constants ---------------- */
+// RUNTIME DETECTION
+type Runtime = "browser" | "node" | "edge" | "serverless" | "unknown";
 
+function detectRuntime(): Runtime {
+  const g = globalThis as any;
 
-declare const __SDK_VERSION__: string;
-declare const __EVENTRA_ENDPOINT__: string | undefined;
+  if (typeof window !== "undefined") return "browser";
+  if (g.EdgeRuntime) return "edge";
+  if (g.process?.env?.AWS_LAMBDA_FUNCTION_NAME) return "serverless";
+  if (g.process?.versions?.node) return "node";
 
-const SDK_VERSION = __SDK_VERSION__;
-
-const DEFAULTS = {
-  endpoint: __EVENTRA_ENDPOINT__ ?? "",
-  flushInterval: 2000,
-  maxBatchSize: 50,
-  maxQueueSize: 10_000,
-  maxRetries: 3,
-  retryBaseDelay: 300,
-};
-
-/* ---------------- Helpers ---------------- */
-
-function getGlobalFetch(): typeof fetch | undefined {
-  if (typeof fetch !== "undefined") {
-    return fetch.bind(globalThis);
-  }
-  return undefined;
+  return "unknown";
 }
 
-function generateUUIDv4(): string {
-  if (
-    typeof crypto !== "undefined" &&
-    typeof crypto.randomUUID === "function"
-  ) {
+// HELPERS
+function uuid(): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();
   }
-
-  // ultra-rare fallback
-  const rnd = Math.random().toString(16).slice(2);
-  const ts = Date.now().toString(16);
-  return `${ts}-${rnd}`;
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function isBrowser(): boolean {
-  return typeof window !== "undefined";
-}
-
-function sleep(ms: number): Promise<void> {
+function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/* ---------------- Leader Election (minimal) ---------------- */
+function getFetch(): typeof fetch {
+  if (typeof fetch !== "undefined") return fetch.bind(globalThis);
+  throw new Error("fetch not available");
+}
 
-const LEADER_KEY = "__eventra_sdk_leader__";
-const LEADER_TTL = 4000;
+// SAFE STORAGE (browser only)
+class Storage {
+  private enabled = false;
 
-function tryBecomeLeader(): boolean {
-  if (!isBrowser()) return true;
+  constructor() {
+    try {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("__t", "1");
+        localStorage.removeItem("__t");
+        this.enabled = true;
+      }
+    } catch {}
+  }
 
-  try {
-    const now = Date.now();
-    const raw = localStorage.getItem(LEADER_KEY);
-
-    if (!raw) {
-      localStorage.setItem(
-        LEADER_KEY,
-        JSON.stringify({ ts: now })
-      );
-      return true;
+  get(key: string): any {
+    if (!this.enabled) return null;
+    try {
+      return JSON.parse(localStorage.getItem(key) || "null");
+    } catch {
+      return null;
     }
+  }
 
-    const parsed = JSON.parse(raw) as { ts: number };
-
-    if (now - parsed.ts > LEADER_TTL) {
-      localStorage.setItem(
-        LEADER_KEY,
-        JSON.stringify({ ts: now })
-      );
-      return true;
-    }
-
-    return false;
-  } catch {
-    return true; // fail-open
+  set(key: string, value: any) {
+    if (!this.enabled) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
   }
 }
 
-/* ============================================================ */
+// LEADER ELECTION (browser)
+class Leader {
+  private channel?: BroadcastChannel;
+  private isLeader = true;
 
+  constructor() {
+    if (typeof BroadcastChannel !== "undefined") {
+      this.channel = new BroadcastChannel("eventra");
+
+      this.channel.onmessage = (e) => {
+        if (e.data === "leader") {
+          this.isLeader = false;
+        }
+      };
+
+      this.channel.postMessage("leader");
+    }
+  }
+
+  canSend() {
+    return this.isLeader;
+  }
+}
+
+// SDK
 export class Eventra {
   private apiKey: string;
   private endpoint: string;
-  private flushInterval: number;
-  private maxBatchSize: number;
-  private maxQueueSize: number;
-  private maxRetries: number;
-  private retryBaseDelay: number;
-  private multiTabMode: "independent" | "leader";
+  private runtime: Runtime;
+  private fetch = getFetch();
 
-  private fetchImpl?: typeof fetch;
   private queue: TrackEvent[] = [];
-  private timer?: ReturnType<typeof setInterval>;
   private inFlight = false;
   private destroyed = false;
-  private droppedEvents = 0;
+
+  private maxBatch = 50;
+  private maxQueue = 10000;
+  private flushInterval = 2000;
+  private retries = 3;
+  private retryDelay = 300;
+
+  private timer?: any;
+
+  private storage = new Storage();
+  private leader = new Leader();
+
+  private failureCount = 0;
+  private circuitOpenUntil = 0;
 
   private sdkInfo: SdkInfo;
 
   constructor(options: TrackerOptions) {
-    if (!options.apiKey) {
-      throw new Error("Eventra: apiKey is required");
-    }
+    if (!options.apiKey) throw new Error("apiKey required");
 
     this.apiKey = options.apiKey;
+    this.endpoint = options.endpoint ?? "";
 
-    this.endpoint = options.endpoint ?? DEFAULTS.endpoint ?? "";
-    if (!this.endpoint) {
-      throw new Error("Eventra: endpoint is not configured");
-    }
+    if (!this.endpoint) throw new Error("endpoint required");
 
-    this.flushInterval =
-      options.flushInterval ?? DEFAULTS.flushInterval;
+    this.runtime = detectRuntime();
 
-    this.maxBatchSize =
-      options.maxBatchSize ?? DEFAULTS.maxBatchSize;
-
-    this.maxQueueSize =
-      options.maxQueueSize ?? DEFAULTS.maxQueueSize;
-
-    this.maxRetries =
-      options.maxRetries ?? DEFAULTS.maxRetries;
-
-    this.retryBaseDelay =
-      options.retryBaseDelayMs ?? DEFAULTS.retryBaseDelay;
-
-    this.multiTabMode =
-      options.multiTabMode ?? "independent";
-
-    this.fetchImpl =
-      options.fetchImpl ?? getGlobalFetch();
-
-    if (!this.fetchImpl) {
-      throw new Error(
-        "Eventra: fetch is not available. Provide fetchImpl."
-      );
-    }
+    this.maxBatch = options.maxBatchSize ?? this.maxBatch;
+    this.maxQueue = options.maxQueueSize ?? this.maxQueue;
+    this.flushInterval = options.flushInterval ?? this.flushInterval;
 
     this.sdkInfo = {
       name: "@eventra_dev/eventra-sdk",
-      version: SDK_VERSION,
-      runtime: this.detectRuntime(),
+      version: "ultra",
+      runtime: this.runtime,
     };
 
-    if (!options.disableTimer) {
+    if (this.runtime === "browser") {
+      const saved = this.storage.get("__eventra_q__");
+      if (saved) this.queue = saved;
+
       this.startTimer();
+      this.setupBrowserExit();
     }
-
-    if (options.autoFlushOnExit !== false) {
-      this.setupExitHandlers();
-    }
-
-    this.onEventsDropped = options.onEventsDropped;
   }
 
-  private onEventsDropped?: (count: number) => void;
-
-  /* ---------------- Public API ---------------- */
-
-  track(
-    name: string,
-    options?: {
-      userId?: string;
-      properties?: Record<string, unknown>;
-    }
-  ) {
+  // PUBLIC
+  track(name: string, options?: any) {
     if (this.destroyed) return;
 
-    if (this.queue.length >= this.maxQueueSize) {
-      this.droppedEvents++;
-      this.onEventsDropped?.(this.droppedEvents);
-      return;
-    }
-
-    this.queue.push({
-      idempotencyKey: generateUUIDv4(),
+    const event: TrackEvent = {
+      idempotencyKey: uuid(),
       name,
       userId: options?.userId,
       properties: options?.properties ?? {},
       timestamp: new Date().toISOString(),
-    });
+    };
 
-    if (this.queue.length >= this.maxBatchSize) {
+    // server environments → instant send
+    if (this.runtime !== "browser") {
+      void this.send([event]);
+      return;
+    }
+
+    // browser → queue
+    if (this.queue.length >= this.maxQueue) return;
+
+    this.queue.push(event);
+    this.persist();
+
+    if (this.queue.length >= this.maxBatch) {
       void this.flush();
     }
   }
 
-  async flush(): Promise<void> {
-    if (this.destroyed) return;
-    if (this.inFlight) return;
-    if (this.queue.length === 0) return;
+  async flush() {
+    if (this.inFlight || this.destroyed) return;
+    if (!this.queue.length) return;
 
-    if (
-      this.multiTabMode === "leader" &&
-      !tryBecomeLeader()
-    ) {
-      return;
-    }
+    if (!this.leader.canSend()) return;
+
+    if (Date.now() < this.circuitOpenUntil) return;
 
     this.inFlight = true;
 
-    const batch = this.queue.splice(0, this.queue.length);
+    const batch = this.queue.splice(0, this.maxBatch);
+    this.persist();
 
     try {
       await this.send(batch);
+
+      this.failureCount = 0;
     } catch {
-      this.queue.unshift(...batch);
+      this.queue = [...batch, ...this.queue];
+      this.persist();
+
+      this.failureCount++;
+
+      if (this.failureCount >= 5) {
+        this.circuitOpenUntil = Date.now() + 5000;
+      }
     } finally {
       this.inFlight = false;
     }
@@ -227,25 +207,7 @@ export class Eventra {
     if (this.timer) clearInterval(this.timer);
   }
 
-  /* ---------------- Transport ---------------- */
-
-  private trySendBeacon(payload: string): boolean {
-    if (!isBrowser()) return false;
-
-    try {
-      if (navigator.sendBeacon) {
-        const blob = new Blob([payload], {
-          type: "application/json",
-        });
-        return navigator.sendBeacon(this.endpoint, blob);
-      }
-    } catch {
-      // ignore
-    }
-
-    return false;
-  }
-
+  // SEND (CORE)
   private async send(events: TrackEvent[]) {
     const payload = JSON.stringify({
       sentAt: new Date().toISOString(),
@@ -253,147 +215,69 @@ export class Eventra {
       events,
     });
 
-    // beacon fast-path (browser only)
+    // sendBeacon fast path
     if (
-      isBrowser() &&
-      payload.length < 60_000 &&
+      this.runtime === "browser" &&
+      typeof navigator !== "undefined" &&
+      navigator.sendBeacon &&
+      payload.length < 60000 &&
       document.visibilityState === "hidden"
     ) {
-      if (this.trySendBeacon(payload)) return;
+      navigator.sendBeacon(this.endpoint, payload);
+      return;
     }
 
     let attempt = 0;
 
-    while (attempt <= this.maxRetries) {
+    while (attempt <= this.retries) {
       try {
-        const res = await this.fetchImpl!(this.endpoint, {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+
+        const res = await this.fetch(this.endpoint, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-api-key": this.apiKey,
           },
           body: payload,
+          signal: controller.signal,
         });
 
-        // ❗ DO NOT retry client errors
-        if (res.status >= 400 && res.status < 500) {
-          if (res.status === 401 || res.status === 403) {
-            console.error("Eventra: Invalid API key");
-          }
-          return;
-        }
+        clearTimeout(timeout);
 
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
+        if (res.status >= 400 && res.status < 500) return;
+
+        if (!res.ok) throw new Error();
 
         return;
-      } catch (err) {
+      } catch {
         attempt++;
 
-        if (attempt > this.maxRetries) {
-          throw err;
-        }
+        if (attempt > this.retries) throw new Error();
 
-        const jitter = 0.5 + Math.random(); // 0.5–1.5
-        const delay =
-          this.retryBaseDelay *
-          2 ** (attempt - 1) *
-          jitter;
-
-        await sleep(delay);
+        await sleep(this.retryDelay * 2 ** attempt);
       }
     }
   }
 
-  /* ---------------- Runtime ---------------- */
-
-  private detectRuntime(): string {
-    const g = globalThis as Record<string, unknown>;
-
-    // Edge (Vercel)
-    if (typeof g["EdgeRuntime"] !== "undefined") {
-      return "edge-vercel";
-    }
-
-    // Cloudflare Workers
-    if (
-      typeof g["WebSocketPair"] !== "undefined" &&
-      typeof g["caches"] !== "undefined"
-    ) {
-      return "edge-cloudflare";
-    }
-
-    // Deno
-    if (g["Deno"]) return "deno";
-
-    // Bun
-    if (g["Bun"]) return "bun";
-
-    // Browser (window)
-    if (typeof window !== "undefined") {
-      return "browser";
-    }
-
-    // Web Worker / Service Worker
-    if (
-      typeof self !== "undefined" &&
-      typeof window === "undefined"
-    ) {
-      return "worker";
-    }
-
-    // Node
-    const maybeProcess = g["process"] as
-      | { versions?: { node?: string } }
-      | undefined;
-
-    if (maybeProcess?.versions?.node) {
-      return "node";
-    }
-
-    return "unknown";
-  }
-
-  /* ---------------- Timer ---------------- */
-
+  // BROWSER
   private startTimer() {
     this.timer = setInterval(() => {
       void this.flush();
     }, this.flushInterval);
   }
 
-  /* ---------------- Exit handling ---------------- */
+  private setupBrowserExit() {
+    window.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        void this.flush();
+      }
+    });
+  }
 
-  private setupExitHandlers() {
-    // browser
-    if (typeof window !== "undefined") {
-      window.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "hidden") {
-          void this.flush();
-        }
-      });
-    }
-
-    // node
-    const g = globalThis as Record<string, unknown>;
-
-    const maybeProcess = g["process"] as
-      | { once?: (event: string, cb: () => void) => void }
-      | undefined;
-
-    if (typeof maybeProcess?.once === "function") {
-      const shutdown = async () => {
-        try {
-          await this.flush();
-        } catch {}
-      };
-
-      maybeProcess.once("SIGINT", shutdown);
-      maybeProcess.once("SIGTERM", shutdown);
-      maybeProcess.once("beforeExit", shutdown);
-    }
+  private persist() {
+    if (this.runtime !== "browser") return;
+    this.storage.set("__eventra_q__", this.queue);
   }
 }
-
-export * from "./types";
