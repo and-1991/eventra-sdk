@@ -1,6 +1,6 @@
 import { TrackerOptions, TrackEvent, SdkInfo } from "./types";
 
-// RUNTIME DETECTION
+// ================= RUNTIME =================
 type Runtime = "browser" | "node" | "edge" | "serverless" | "unknown";
 
 function detectRuntime(): Runtime {
@@ -14,7 +14,7 @@ function detectRuntime(): Runtime {
   return "unknown";
 }
 
-// HELPERS
+// ================= HELPERS =================
 function uuid(): string {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -26,12 +26,7 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function getFetch(): typeof fetch {
-  if (typeof fetch !== "undefined") return fetch.bind(globalThis);
-  throw new Error("fetch not available");
-}
-
-// SAFE STORAGE (browser only)
+// ================= STORAGE =================
 class Storage {
   private enabled = false;
 
@@ -62,19 +57,19 @@ class Storage {
   }
 }
 
-// LEADER ELECTION (browser)
+// ================= LEADER =================
 class Leader {
   private channel?: BroadcastChannel;
   private isLeader = true;
 
-  constructor() {
+  constructor(enabled: boolean) {
+    if (!enabled) return;
+
     if (typeof BroadcastChannel !== "undefined") {
       this.channel = new BroadcastChannel("eventra");
 
       this.channel.onmessage = (e) => {
-        if (e.data === "leader") {
-          this.isLeader = false;
-        }
+        if (e.data === "leader") this.isLeader = false;
       };
 
       this.channel.postMessage("leader");
@@ -84,67 +79,103 @@ class Leader {
   canSend() {
     return this.isLeader;
   }
+
+  destroy() {
+    this.channel?.close();
+  }
 }
 
-// SDK
+// ================= SDK =================
 export class Eventra {
   private apiKey: string;
   private endpoint: string;
   private runtime: Runtime;
-  private fetch = getFetch();
+  private fetch: typeof fetch;
 
   private queue: TrackEvent[] = [];
   private inFlight = false;
   private destroyed = false;
 
-  private maxBatch = 50;
-  private maxQueue = 10000;
-  private flushInterval = 2000;
-  private retries = 3;
-  private retryDelay = 300;
+  private maxBatch: number;
+  private maxQueue: number;
+  private flushInterval: number;
+  private retries: number;
+  private retryDelay: number;
 
   private timer?: any;
 
   private storage = new Storage();
-  private leader = new Leader();
+  private leader: Leader | null = null;
 
   private failureCount = 0;
   private circuitOpenUntil = 0;
 
   private sdkInfo: SdkInfo;
+  private options: TrackerOptions;
+
+  private exitHandlers: Array<() => void> = [];
 
   constructor(options: TrackerOptions) {
     if (!options.apiKey) throw new Error("apiKey required");
+    if (!options.endpoint) throw new Error("endpoint required");
 
+    this.options = options;
     this.apiKey = options.apiKey;
-    this.endpoint = options.endpoint ?? "";
-
-    if (!this.endpoint) throw new Error("endpoint required");
-
+    this.endpoint = options.endpoint;
     this.runtime = detectRuntime();
 
-    this.maxBatch = options.maxBatchSize ?? this.maxBatch;
-    this.maxQueue = options.maxQueueSize ?? this.maxQueue;
-    this.flushInterval = options.flushInterval ?? this.flushInterval;
+    this.fetch = options.fetchImpl ?? globalThis.fetch;
+    if (!this.fetch) {
+      throw new Error("fetch not available — provide fetchImpl");
+    }
+
+    this.maxBatch = options.maxBatchSize ?? 50;
+    this.maxQueue = options.maxQueueSize ?? 10000;
+    this.flushInterval = options.flushInterval ?? 2000;
+    this.retries = options.maxRetries ?? 3;
+    this.retryDelay = options.retryBaseDelayMs ?? 300;
 
     this.sdkInfo = {
       name: "@eventra_dev/eventra-sdk",
-      version: "ultra",
+      version: "1.0.0",
       runtime: this.runtime,
     };
 
+    // restore browser queue
     if (this.runtime === "browser") {
       const saved = this.storage.get("__eventra_q__");
-      if (saved) this.queue = saved;
+      if (Array.isArray(saved)) this.queue = saved;
+    }
 
+    // leader (browser only)
+    if (this.runtime === "browser" && options.multiTabMode === "leader") {
+      this.leader = new Leader(true);
+    }
+
+    // timer
+    if (!options.disableTimer) {
       this.startTimer();
+    }
+
+    // browser exit
+    if (this.runtime === "browser") {
       this.setupBrowserExit();
+    }
+
+    // node / serverless exit
+    if (options.autoFlushOnExit !== false && this.runtime !== "browser") {
+      this.setupProcessExit();
     }
   }
 
-  // PUBLIC
+  // ================= PUBLIC =================
   track(name: string, options?: any) {
     if (this.destroyed) return;
+
+    if (this.queue.length >= this.maxQueue) {
+      this.options.onEventsDropped?.(1);
+      return;
+    }
 
     const event: TrackEvent = {
       idempotencyKey: uuid(),
@@ -154,19 +185,17 @@ export class Eventra {
       timestamp: new Date().toISOString(),
     };
 
-    // server environments → instant send
-    if (this.runtime !== "browser") {
-      void this.send([event]);
-      return;
+    this.queue.push(event);
+
+    if (this.runtime === "browser") {
+      this.persist();
     }
 
-    // browser → queue
-    if (this.queue.length >= this.maxQueue) return;
-
-    this.queue.push(event);
-    this.persist();
-
     if (this.queue.length >= this.maxBatch) {
+      void this.flush();
+    }
+
+    if (this.runtime === "serverless") {
       void this.flush();
     }
   }
@@ -175,22 +204,27 @@ export class Eventra {
     if (this.inFlight || this.destroyed) return;
     if (!this.queue.length) return;
 
-    if (!this.leader.canSend()) return;
-
+    if (this.leader && !this.leader.canSend()) return;
     if (Date.now() < this.circuitOpenUntil) return;
 
     this.inFlight = true;
 
     const batch = this.queue.splice(0, this.maxBatch);
-    this.persist();
+
+    if (this.runtime === "browser") {
+      this.persist();
+    }
 
     try {
       await this.send(batch);
-
       this.failureCount = 0;
     } catch {
+      // возвращаем батч назад (без dedupe — это задача backend)
       this.queue = [...batch, ...this.queue];
-      this.persist();
+
+      if (this.runtime === "browser") {
+        this.persist();
+      }
 
       this.failureCount++;
 
@@ -204,10 +238,18 @@ export class Eventra {
 
   destroy() {
     this.destroyed = true;
+
     if (this.timer) clearInterval(this.timer);
+
+    this.leader?.destroy();
+
+    // remove process listeners
+    for (const off of this.exitHandlers) {
+      off();
+    }
   }
 
-  // SEND (CORE)
+  // ================= SEND =================
   private async send(events: TrackEvent[]) {
     const payload = JSON.stringify({
       sentAt: new Date().toISOString(),
@@ -215,7 +257,6 @@ export class Eventra {
       events,
     });
 
-    // sendBeacon fast path
     if (
       this.runtime === "browser" &&
       typeof navigator !== "undefined" &&
@@ -247,21 +288,18 @@ export class Eventra {
         clearTimeout(timeout);
 
         if (res.status >= 400 && res.status < 500) return;
-
         if (!res.ok) throw new Error();
 
         return;
       } catch {
         attempt++;
-
         if (attempt > this.retries) throw new Error();
-
         await sleep(this.retryDelay * 2 ** attempt);
       }
     }
   }
 
-  // BROWSER
+  // ================= INTERNAL =================
   private startTimer() {
     this.timer = setInterval(() => {
       void this.flush();
@@ -269,10 +307,44 @@ export class Eventra {
   }
 
   private setupBrowserExit() {
-    window.addEventListener("visibilitychange", () => {
+    const handler = () => {
       if (document.visibilityState === "hidden") {
         void this.flush();
       }
+    };
+
+    window.addEventListener("visibilitychange", handler);
+
+    this.exitHandlers.push(() => {
+      window.removeEventListener("visibilitychange", handler);
+    });
+  }
+
+  private setupProcessExit() {
+
+    const g = globalThis as any;
+
+    const flushSafe = async () => {
+      try {
+        await this.flush();
+      } catch {}
+    };
+
+    const beforeExit = () => {
+      void flushSafe();
+    };
+
+    const sigint = async () => {
+      await flushSafe();
+      g.exit();
+    };
+
+    g?.on?.("beforeExit", beforeExit);
+    g?.on?.("SIGINT", sigint);
+
+    this.exitHandlers.push(() => {
+      g?.off?.("beforeExit", beforeExit);
+      g?.off?.("SIGINT", sigint);
     });
   }
 
