@@ -8,11 +8,11 @@ Production-grade analytics SDK for tracking **feature usage, product behavior, a
 
 Eventra helps you:
 
-* Track feature adoption
-* Detect unused features
-* Understand user behavior
-* Monitor backend usage
-* Analyze product growth
+- Track feature adoption 
+- Detect unused features 
+- Understand user behavior 
+- Monitor backend usage 
+- Analyze product growth
 
 ---
 
@@ -20,12 +20,12 @@ Eventra helps you:
 
 Eventra SDK is:
 
-* Lightweight (~minimal overhead)
-* Runtime-aware (Browser, Node, Edge, Serverless)
-* Resilient (batching + retry + circuit breaker)
-* Durable (browser persistence)
-* Smart (adaptive behavior per environment)
-* TypeScript-first
+- Lightweight (~minimal overhead)
+- Runtime-aware (Browser, Node, Edge, Serverless)
+- Resilient (batching + retry + circuit breaker)
+- Durable (browser persistence)
+- Consistent (same delivery model across all environments)
+- TypeScript-first
 
 ---
 
@@ -64,11 +64,11 @@ That's it.
 
 The SDK automatically handles:
 
-* batching (browser)
-* retries
-* queueing
-* flushing
-* runtime adaptation
+- batching 
+- retries 
+- queueing 
+- flushing 
+- runtime adaptation
 
 ---
 
@@ -76,13 +76,13 @@ The SDK automatically handles:
 
 Eventra SDK adapts automatically:
 
-| Environment | Behavior                       |
-| ----------- | ------------------------------ |
-| Browser     | batching + persistence + retry |
-| Node.js     | instant send                   |
-| Serverless  | sync send (no event loss)      |
-| Edge        | lightweight send               |
-| Workers     | instant send                   |
+| Environment | Behavior                               |
+| ----------- | -------------------------------------- |
+| Browser     | batching + persistence + retry         |
+| Node.js     | batching + retry                       |
+| Serverless  | immediate flush + retry                |
+| Edge        | lightweight batching                   |
+| Workers     | batching                               |
 
 No config needed.
 
@@ -167,14 +167,14 @@ tracker.track("error.occurred", {
 
 ## Where You Can Use It
 
-* Browser apps
-* React / Next.js
-* Node.js backends
-* NestJS services
-* Express APIs
-* Edge runtimes
-* Serverless (AWS / Vercel)
-* Bun / Deno
+- Browser apps
+- React / Next.js 
+- Node.js backends 
+- NestJS services 
+- Express APIs 
+- Edge runtimes 
+- Serverless (AWS / Vercel)
+- Bun / Deno
 
 ---
 
@@ -190,10 +190,10 @@ const tracker = new Eventra({
 tracker.track("page.viewed");
 ```
 
-✔ batching
-✔ retry
-✔ persistence (localStorage)
-✔ flush on tab close
+- batching  
+- retry  
+- persistence (localStorage)  
+- flush on tab close
 
 ---
 
@@ -207,8 +207,10 @@ const tracker = new Eventra({
 tracker.track("invoice.created");
 ```
 
-✔ immediate send
-✔ no buffering
+- batching  
+- retry  
+- auto flush (interval)  
+- graceful shutdown support
 
 ---
 
@@ -220,14 +222,15 @@ export default async function handler(req, res) {
     apiKey: "...",
   });
 
-  await tracker.track("function.called");
+  tracker.track("function.called");
 
   res.status(200).end();
 }
 ```
 
-✔ no event loss
-✔ sync delivery
+- immediate flush
+- retry
+- optimized for short-lived environments
 
 ---
 
@@ -252,7 +255,7 @@ const tracker = new Eventra({
 | ------------- | ----------------------------- |
 | apiKey        | Project API key               |
 | endpoint      | Event ingestion endpoint      |
-| flushInterval | Batch interval (browser only) |
+| flushInterval | Flush interval (ms)           |
 | maxBatchSize  | Events per batch              |
 | maxQueueSize  | Max buffer size               |
 | maxRetries    | Retry attempts                |
@@ -273,7 +276,7 @@ await tracker.flush();
 tracker.destroy();
 ```
 
-Stops timers and clears internal state.
+Stops timers, removes listeners, and clears internal state.
 
 ---
 
@@ -281,12 +284,12 @@ Stops timers and clears internal state.
 
 Eventra SDK includes:
 
-* Idempotency (no duplicates)
-* Retry with exponential backoff
-* Circuit breaker (prevents overload)
-* Queue persistence (browser)
-* Safe fallback for all runtimes
-* sendBeacon optimization (browser exit)
+- Idempotency (stable event IDs during retries)
+- Retry with exponential backoff 
+- Circuit breaker (prevents overload)
+- Queue-based delivery (all runtimes)
+- Queue persistence (browser)
+- sendBeacon optimization (browser exit)
 
 ---
 
@@ -297,11 +300,12 @@ Eventra SDK includes:
   "sentAt": "2026-03-12T10:00:00Z",
   "sdk": {
     "name": "@eventra_dev/eventra-sdk",
-    "version": "ultra",
+    "version": "1.0.0",
     "runtime": "browser"
   },
   "events": [
     {
+      "idempotencyKey": "uuid",
       "name": "user_signup",
       "userId": "user_123",
       "timestamp": "2026-03-12T10:00:00Z",
