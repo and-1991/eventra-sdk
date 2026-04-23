@@ -4,6 +4,11 @@
 
 # Eventra SDK
 
+[![npm version](https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
+[![npm downloads](https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg)](https://www.npmjs.com/package/@eventra_dev/eventra-sdk)
+[![TypeScript](https://img.shields.io/badge/typescript-ready-blue.svg)](https://www.typescriptlang.org/)
+[![License](https://img.shields.io/npm/l/@eventra_dev/eventra-sdk)]()
+
 Production-grade analytics SDK for tracking **feature usage, product behavior, and backend activity**.
 
 Eventra helps you:
@@ -300,7 +305,7 @@ Eventra SDK includes:
   "sentAt": "2026-03-12T10:00:00Z",
   "sdk": {
     "name": "@eventra_dev/eventra-sdk",
-    "version": "1.0.0",
+    "version": "1.1.3",
     "runtime": "browser"
   },
   "events": [
