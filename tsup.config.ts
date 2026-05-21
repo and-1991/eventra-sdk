@@ -19,7 +19,12 @@ export default defineConfig({
   target: "es2022",
 
   define: {
-    __SDK_VERSION__: JSON.stringify(process.env.npm_package_version),
-    __EVENTRA_ENDPOINT__: JSON.stringify(process.env.EVENTRA_ENDPOINT),
+    __SDK_VERSION__: JSON.stringify(
+      process.env.npm_package_version ?? "0.0.0-dev",
+    ),
+    __EVENTRA_ENDPOINT__: JSON.stringify(
+      process.env.EVENTRA_ENDPOINT ??
+        "https://api.eventra.dev/api/v1/ingest/batch",
+    ),
   },
 });

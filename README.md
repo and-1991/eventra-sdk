@@ -57,7 +57,6 @@ import { Eventra } from "@eventra_dev/eventra-sdk";
 
 const tracker = new Eventra({
   apiKey: "YOUR_PROJECT_API_KEY",
-  endpoint: "https://api.eventra.dev/ingest",
 });
 
 tracker.track("checkout.completed", {
@@ -66,6 +65,8 @@ tracker.track("checkout.completed", {
 ```
 
 That's it.
+
+By default, events are sent to `https://api.eventra.dev/api/v1/ingest/batch`.
 
 The SDK automatically handles:
 
@@ -113,6 +114,8 @@ Minimal:
 ```ts
 tracker.track("app.loaded");
 ```
+
+Event names are trimmed to 64 characters, `userId` to 120 (API limits).
 
 ---
 
@@ -198,7 +201,16 @@ tracker.track("page.viewed");
 - batching  
 - retry  
 - persistence (localStorage)  
-- flush on tab close
+- flush on tab close (`fetch` with `keepalive`)
+
+Optional — single sender across tabs:
+
+```ts
+const tracker = new Eventra({
+  apiKey: "...",
+  multiTabMode: "leader",
+});
+```
 
 ---
 
@@ -229,6 +241,8 @@ export default async function handler(req, res) {
 
   tracker.track("function.called");
 
+  await tracker.flush();
+
   res.status(200).end();
 }
 ```
@@ -244,11 +258,29 @@ export default async function handler(req, res) {
 ```ts
 const tracker = new Eventra({
   apiKey: "YOUR_PROJECT_API_KEY",
-  endpoint: "CUSTOM_ENDPOINT",
   flushInterval: 2000,
   maxBatchSize: 50,
   maxQueueSize: 10000,
   maxRetries: 3,
+  retryBaseDelayMs: 300,
+  maxPayloadBytes: 60000,
+  onEventsDropped: (count) => {
+    console.warn(`Dropped ${count} event(s) — queue full`);
+  },
+  onDeliveryFailed: ({ status, events }) => {
+    console.error(`Ingest rejected batch (${status})`, events.length);
+  },
+});
+```
+
+`endpoint` is optional — omit it to use the production ingest URL.
+
+For self-hosted or local development:
+
+```ts
+const tracker = new Eventra({
+  apiKey: "...",
+  endpoint: "...",
 });
 ```
 
@@ -256,14 +288,22 @@ const tracker = new Eventra({
 
 ##  Options
 
-| option        | description                   |
-| ------------- | ----------------------------- |
-| apiKey        | Project API key               |
-| endpoint      | Event ingestion endpoint      |
-| flushInterval | Flush interval (ms)           |
-| maxBatchSize  | Events per batch              |
-| maxQueueSize  | Max buffer size               |
-| maxRetries    | Retry attempts                |
+| option | description |
+| ------------- | --------------------------- |
+| apiKey | Project API key (required) |
+| endpoint | Ingest batch URL |
+| flushInterval | Flush interval (ms) |
+| maxBatchSize | Events per batch |
+| maxQueueSize | Max buffer size |
+| maxRetries | Total delivery attempts per batch (default: 3) |
+| retryBaseDelayMs | Base delay for exponential backoff (ms) |
+| maxPayloadBytes | Max serialized batch size (default: 60000) |
+| fetchImpl | Custom `fetch` (Node without native fetch, tests) |
+| autoFlushOnExit | Flush on process exit (Node / serverless, default: `true`) |
+| disableTimer | Disable periodic flush timer |
+| onEventsDropped | Callback when queue is full |
+| onDeliveryFailed | Callback on permanent ingest errors (4xx except 429) |
+| multiTabMode | `"independent"` (default) or `"leader"` (browser only) |
 
 ---
 
@@ -275,13 +315,22 @@ await tracker.flush();
 
 ---
 
-## Cleanup
+## Shutdown
+
+Graceful shutdown — flush first, then cleanup:
 
 ```ts
-tracker.destroy();
+await tracker.shutdown();
 ```
 
-Stops timers, removes listeners, and clears internal state.
+For Node / serverless, prefer explicit shutdown over relying on process signals:
+
+```ts
+await tracker.flush();
+await tracker.shutdown();
+```
+
+`destroy()` stops timers and listeners immediately without flushing.
 
 ---
 
@@ -289,12 +338,19 @@ Stops timers, removes listeners, and clears internal state.
 
 Eventra SDK includes:
 
-- Idempotency (stable event IDs during retries)
-- Retry with exponential backoff 
-- Circuit breaker (prevents overload)
+- Idempotency (UUID v4 per event, stable across retries)
+- Retry with exponential backoff + jitter (capped)
+- Circuit breaker with half-open recovery
 - Queue-based delivery (all runtimes)
-- Queue persistence (browser)
-- sendBeacon optimization (browser exit)
+- Safe dequeue (events removed only after successful ingest)
+- Queue persistence (browser) with merge + cross-tab sync
+- Multi-tab leader election with re-election
+- `fetch` + `keepalive` on tab close (with `x-api-key`, size-checked)
+- `pagehide` + `visibilitychange` flush hooks
+- Property validation at `track()` (depth + size)
+- Payload byte limits per batch
+- Permanent error handling via `onDeliveryFailed` (401, 422, etc.)
+- Automatic requeue on network errors and 429 / 5xx
 
 ---
 
@@ -310,7 +366,7 @@ Eventra SDK includes:
   },
   "events": [
     {
-      "idempotencyKey": "uuid",
+      "idempotencyKey": "550e8400-e29b-41d4-a716-446655440000",
       "name": "user_signup",
       "userId": "user_123",
       "timestamp": "2026-03-12T10:00:00Z",
