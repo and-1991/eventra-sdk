@@ -361,7 +361,7 @@ Eventra SDK includes:
   "sentAt": "2026-03-12T10:00:00Z",
   "sdk": {
     "name": "@eventra_dev/eventra-sdk",
-    "version": "1.1.3",
+    "version": "<sdk-version>",
     "runtime": "browser"
   },
   "events": [
@@ -375,6 +375,18 @@ Eventra SDK includes:
   ]
 }
 ```
+
+Limits enforced by the SDK at `track()` time:
+
+| Field | Limit |
+|-------|-------|
+| `name` | trimmed, ≤ 64 chars |
+| `userId` | ≤ 120 chars |
+| `properties` (JSON serialized) | ≤ 32,000 bytes per event |
+| Property nesting depth | ≤ 8 |
+| Batch payload | ≤ `maxPayloadBytes` (default 60,000) |
+| Fetch timeout | 5,000 ms |
+| Circuit breaker | opens after 5 consecutive failures, cools down 5,000 ms |
 
 ---
 
