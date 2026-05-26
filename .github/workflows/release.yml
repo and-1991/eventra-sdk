@@ -26,6 +26,9 @@ jobs:
 
       - run: pnpm install
 
+      - name: Run tests
+        run: pnpm test
+
       - name: Build SDK
         run: pnpm build
         env:

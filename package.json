@@ -1,6 +1,7 @@
 {
   "name": "@eventra_dev/eventra-sdk",
-  "version": "1.1.5",
+  "version": "1.2.0",
+  "description": "Production-grade analytics SDK for feature usage and product behavior — batching, retries, circuit breaker, runtime-aware (browser, Node, Edge, serverless).",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -21,7 +22,10 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsup",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "repository": {
     "type": "git",
@@ -29,11 +33,43 @@
   },
   "homepage": "https://eventra.dev",
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.7",
     "tsup": "^8.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.7"
   },
   "license": "MIT",
   "engines": {
     "node": ">=18"
-  }
+  },
+  "keywords": [
+    "analytics",
+    "analytics-sdk",
+    "event-tracking",
+    "feature-usage",
+    "feature-tracking",
+    "product-analytics",
+    "telemetry",
+    "metrics",
+    "tracking",
+    "events",
+    "ingest",
+    "batching",
+    "retry",
+    "circuit-breaker",
+    "idempotency",
+    "browser",
+    "nodejs",
+    "edge",
+    "serverless",
+    "vercel",
+    "aws-lambda",
+    "cloudflare-workers",
+    "typescript",
+    "typescript-first",
+    "esm",
+    "cjs",
+    "eventra",
+    "eventra-sdk"
+  ]
 }
