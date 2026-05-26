@@ -12,7 +12,9 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [18, 20, 22]
+        # vitest 4 requires Node >= 20 (uses node:util.styleText)
+        # the SDK runtime itself still supports Node >= 18 (declared in engines)
+        node-version: [20, 22]
 
     steps:
       - uses: actions/checkout@v4
