@@ -19,6 +19,15 @@ export interface TrackerOptions {
   autoFlushOnExit?: boolean;
   disableTimer?: boolean;
 
+  /**
+   * Persist the pending queue to `localStorage` in the browser so it survives
+   * reloads/tab closes (default `true`). Queued events can include `userId`
+   * and custom `properties`, which end up unencrypted in `localStorage` while
+   * this is on. Set to `false` to keep the queue in memory only — events are
+   * lost if the page is closed before they're delivered.
+   */
+  persistQueue?: boolean;
+
   /** Called when events are dropped due to queue overflow */
   onEventsDropped?: (count: number) => void;
 

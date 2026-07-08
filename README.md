@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm version" src="https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://github.com/and-1991/eventra-sdk/actions/workflows/test.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/and-1991/eventra-sdk/test.yml?branch=main&label=tests&style=flat-square&logo=vitest&logoColor=white"></a>
-  <img alt="tests passing" src="https://img.shields.io/badge/tests-41%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
+  <img alt="tests passing" src="https://img.shields.io/badge/tests-44%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="test suites" src="https://img.shields.io/badge/suites-8-brightgreen?style=flat-square">
   <img alt="node" src="https://img.shields.io/node/v/@eventra_dev/eventra-sdk?style=flat-square&color=darkgreen&logo=node.js&logoColor=white">
   <a href="https://www.typescriptlang.org/"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-ready-blue?style=flat-square&logo=typescript&logoColor=white"></a>
@@ -121,7 +121,7 @@ Minimal:
 tracker.track("app.loaded");
 ```
 
-Event names are trimmed to 64 characters, `userId` to 120 (API limits).
+Event names are trimmed to 64 characters, `userId` to 120 (API limits). `track()` never throws: an empty name, or properties that exceed the depth/size limits, are dropped silently and reported via `onEventsDropped` instead.
 
 ---
 
@@ -218,6 +218,17 @@ const tracker = new Eventra({
 });
 ```
 
+**Privacy note:** persistence stores the pending queue — including any `userId`/`properties` you pass to `track()` — as plaintext JSON in `localStorage` so it survives reloads. If that's a concern (e.g. properties may carry PII on a shared/public device), disable it:
+
+```ts
+const tracker = new Eventra({
+  apiKey: "...",
+  persistQueue: false,
+});
+```
+
+With `persistQueue: false`, nothing is written to `localStorage`; the queue lives in memory only and is lost if the page closes before delivery (live cross-tab dedup via `BroadcastChannel` still works, since that's never written to disk).
+
 ---
 
 ### Node.js
@@ -310,6 +321,7 @@ const tracker = new Eventra({
 | onEventsDropped | Callback when queue is full |
 | onDeliveryFailed | Callback on permanent ingest errors (4xx except 429) |
 | multiTabMode | `"independent"` (default) or `"leader"` (browser only) |
+| persistQueue | Persist the queue to `localStorage` in the browser (browser only, default: `true`) — `false` keeps it in-memory only, avoiding writing `userId`/`properties` to disk |
 
 ---
 
@@ -349,11 +361,11 @@ Eventra SDK includes:
 - Circuit breaker with half-open recovery
 - Queue-based delivery (all runtimes)
 - Safe dequeue (events removed only after successful ingest)
-- Queue persistence (browser) with merge + cross-tab sync
+- Queue persistence (browser) with merge + cross-tab sync — opt out via `persistQueue: false` if `localStorage` isn't acceptable for your data
 - Multi-tab leader election with re-election
 - `fetch` + `keepalive` on tab close (with `x-api-key`, size-checked)
 - `pagehide` + `visibilitychange` flush hooks
-- Property validation at `track()` (depth + size)
+- Property validation at `track()` (depth + size) — fails soft via `onEventsDropped`, `track()` never throws
 - Payload byte limits per batch
 - Permanent error handling via `onDeliveryFailed` (401, 422, etc.)
 - Automatic requeue on network errors and 429 / 5xx
@@ -362,7 +374,7 @@ Eventra SDK includes:
 
 ## Test Coverage
 
-41 vitest tests across 8 suites cover the entire delivery pipeline:
+44 vitest tests across 8 suites cover the entire delivery pipeline:
 
 - `track()` validation — name length, userId truncation, properties depth/size, idempotency keys
 - Batching — auto-flush at `maxBatchSize`, periodic flush via timer, queue overflow drop
@@ -379,6 +391,8 @@ Run locally:
 pnpm --filter @eventra_dev/eventra-sdk test
 pnpm --filter @eventra_dev/eventra-sdk test:coverage
 ```
+
+> **Node version note:** the SDK itself supports Node 18+ (see `engines`), but `vitest@4` depends on `node:util`'s `styleText`, which requires Node **≥ 20.12** — running the test suite on an older Node 20.x patch (or Node 18) fails to start. CI runs the matrix on Node 20 and 22; locally, use the version pinned in the repo's `.nvmrc`.
 
 ---
 

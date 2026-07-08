@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Eventra } from "../src";
 import { createMockFetch } from "./helpers/mockFetch";
 
@@ -23,15 +23,21 @@ function makeSdk(extra: Partial<ConstructorParameters<typeof Eventra>[0]> = {}) 
 }
 
 describe("track() validation", () => {
-  it("rejects empty event name", () => {
-    const { sdk } = makeSdk();
-    expect(() => sdk.track("")).toThrow(/event name is required/);
-    expect(() => sdk.track("   ")).toThrow(/event name is required/);
+  it("drops an empty event name via onEventsDropped instead of throwing", () => {
+    const onEventsDropped = vi.fn();
+    const { sdk, calls } = makeSdk({ onEventsDropped });
+    expect(() => sdk.track("")).not.toThrow();
+    expect(() => sdk.track("   ")).not.toThrow();
+    expect(onEventsDropped).toHaveBeenCalledTimes(2);
+    expect(onEventsDropped).toHaveBeenCalledWith(1);
+    expect(calls.length).toBe(0);
   });
 
-  it("rejects name longer than 64 chars", () => {
-    const { sdk } = makeSdk();
-    expect(() => sdk.track("a".repeat(65))).toThrow(/exceeds max length/);
+  it("truncates name longer than 64 chars instead of throwing", async () => {
+    const { sdk, calls } = makeSdk();
+    expect(() => sdk.track("a".repeat(65))).not.toThrow();
+    await sdk.flush();
+    expect(calls[0].body.events[0].name).toBe("a".repeat(64));
   });
 
   it("trims surrounding whitespace before length check", async () => {
@@ -48,21 +54,27 @@ describe("track() validation", () => {
     expect((calls[0].body.events[0].userId as string).length).toBe(120);
   });
 
-  it("rejects properties deeper than 8 levels", () => {
-    const { sdk } = makeSdk();
+  it("drops properties deeper than 8 levels via onEventsDropped instead of throwing", () => {
+    const onEventsDropped = vi.fn();
+    const { sdk, calls } = makeSdk({ onEventsDropped });
     const deep: Record<string, unknown> = {};
     let cursor: Record<string, unknown> = deep;
     for (let i = 0; i < 10; i++) {
       cursor.child = {} as Record<string, unknown>;
       cursor = cursor.child as Record<string, unknown>;
     }
-    expect(() => sdk.track("evt", { properties: deep })).toThrow(/max depth/);
+    expect(() => sdk.track("evt", { properties: deep })).not.toThrow();
+    expect(onEventsDropped).toHaveBeenCalledWith(1);
+    expect(calls.length).toBe(0);
   });
 
-  it("rejects properties larger than 32 KB", () => {
-    const { sdk } = makeSdk();
+  it("drops properties larger than 32 KB via onEventsDropped instead of throwing", () => {
+    const onEventsDropped = vi.fn();
+    const { sdk, calls } = makeSdk({ onEventsDropped });
     const huge = { blob: "x".repeat(40_000) };
-    expect(() => sdk.track("evt", { properties: huge })).toThrow(/max size/);
+    expect(() => sdk.track("evt", { properties: huge })).not.toThrow();
+    expect(onEventsDropped).toHaveBeenCalledWith(1);
+    expect(calls.length).toBe(0);
   });
 
   it("assigns a unique idempotencyKey per event", async () => {

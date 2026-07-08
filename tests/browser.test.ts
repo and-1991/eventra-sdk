@@ -163,6 +163,88 @@ describe("browser mode", () => {
     await vi.waitFor(() => expect(calls.length).toBe(1));
   });
 
+  it("persistQueue: false never writes the event queue to localStorage", async () => {
+    const { fetchImpl, calls } = createMockFetch({ responses: [500] });
+    const sdk = new Eventra({
+      apiKey: "k",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      fetchImpl,
+      maxRetries: 1,
+      persistQueue: false,
+    });
+    active.push(sdk);
+
+    sdk.track("user.signup", { userId: "user_123", properties: { plan: "pro" } });
+    await sdk.flush(); // delivery fails (500) — event stays queued in memory
+
+    expect(env.storage.getItem("__eventra_q__")).toBeNull();
+    expect(calls.length).toBe(1);
+  });
+
+  it("persistQueue: false does not recover a queue left by a previous session", async () => {
+    env.storage.setItem(
+      "__eventra_q__",
+      JSON.stringify([
+        {
+          idempotencyKey: "11111111-1111-4111-8111-111111111111",
+          name: "old.event",
+          properties: {},
+          timestamp: "2026-01-01T00:00:00.000Z",
+        },
+      ]),
+    );
+
+    const { fetchImpl, calls } = createMockFetch({ responses: [200] });
+    const sdk = new Eventra({
+      apiKey: "k",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      fetchImpl,
+      persistQueue: false,
+    });
+    active.push(sdk);
+
+    await sdk.flush();
+    expect(calls.length).toBe(0); // nothing queued — old.event was never loaded
+  });
+
+  it("persistQueue: false still dedupes live via BroadcastChannel", async () => {
+    const { fetchImpl, calls } = createMockFetch({ responses: [200] });
+    const sdk = new Eventra({
+      apiKey: "k",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      fetchImpl,
+      persistQueue: false,
+    });
+    active.push(sdk);
+
+    sdk.track("local.a");
+
+    const ChannelCtor = (globalThis as { BroadcastChannel: typeof BroadcastChannel })
+      .BroadcastChannel;
+    const sibling = new ChannelCtor("eventra-sdk");
+    sibling.postMessage({
+      type: "queue-sync",
+      events: [
+        {
+          idempotencyKey: "22222222-2222-4222-8222-222222222222",
+          name: "remote.b",
+          properties: {},
+          timestamp: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+
+    await sdk.flush();
+    expect(env.storage.getItem("__eventra_q__")).toBeNull();
+    expect(calls[0]?.body.events.map((e) => e.name).sort()).toEqual([
+      "local.a",
+      "remote.b",
+    ]);
+  });
+
   it("acquires leadership when multiTabMode = 'leader'", async () => {
     const { fetchImpl } = createMockFetch({ responses: [200] });
     const sdk = new Eventra({

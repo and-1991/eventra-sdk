@@ -71,15 +71,16 @@ function truncate(value: string | undefined, max: number): string | undefined {
   return value.length > max ? value.slice(0, max) : value;
 }
 
-function validateEventName(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) {
-    throw new Error("Eventra: event name is required");
-  }
-  if (trimmed.length > MAX_EVENT_NAME) {
-    throw new Error(`Eventra: event name exceeds max length (${MAX_EVENT_NAME})`);
-  }
-  return trimmed;
+/**
+ * Never throws — `track()` is called fire-and-forget from arbitrary call sites,
+ * so a malformed name must degrade gracefully instead of crashing the caller.
+ * Returns `null` for an empty name (event should be dropped); otherwise trims
+ * and truncates to `MAX_EVENT_NAME`, matching the documented behavior.
+ */
+function normalizeEventName(name: string): string | null {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) return null;
+  return trimmed.length > MAX_EVENT_NAME ? trimmed.slice(0, MAX_EVENT_NAME) : trimmed;
 }
 
 function backoffMs(attempt: number, base: number): number {
@@ -354,6 +355,7 @@ export class Eventra {
   private flushInterval: number;
   private retries: number;
   private retryDelay: number;
+  private persistQueue: boolean;
 
   private timer?: ReturnType<typeof setInterval>;
 
@@ -397,6 +399,10 @@ export class Eventra {
     this.flushInterval = options.flushInterval ?? 2000;
     this.retries = options.maxRetries ?? 3;
     this.retryDelay = options.retryBaseDelayMs ?? 300;
+    // Queued events may carry userId/properties — default on for durability
+    // across reloads, but let privacy-sensitive integrators opt out of ever
+    // writing that data to localStorage.
+    this.persistQueue = options.persistQueue ?? true;
 
     this.sdkInfo = {
       name: SDK_NAME,
@@ -405,7 +411,9 @@ export class Eventra {
     };
 
     if (this.runtime === "browser") {
-      this.loadAndMergeQueue();
+      if (this.persistQueue) {
+        this.loadAndMergeQueue();
+      }
       this.setupQueueSync();
     }
 
@@ -431,14 +439,20 @@ export class Eventra {
   track(name: string, options?: TrackOptions) {
     if (this.destroyed || this.shuttingDown) return;
 
-    let eventName: string;
+    const eventName = normalizeEventName(name);
+    if (eventName === null) {
+      this.options.onEventsDropped?.(1);
+      return;
+    }
+
     let properties: Record<string, unknown>;
     try {
-      eventName = validateEventName(name);
       properties = validateProperties(options?.properties ?? {});
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "invalid event";
-      throw new Error(message);
+    } catch {
+      // Oversized/too-deep properties can't be safely truncated — drop the
+      // event instead of throwing out of a fire-and-forget call site.
+      this.options.onEventsDropped?.(1);
+      return;
     }
 
     if (this.queue.length >= this.maxQueue) {
@@ -690,13 +704,17 @@ export class Eventra {
   }
 
   private syncQueue() {
-    const remote = this.storage.get(QUEUE_KEY);
-    const merged = mergeQueues(
-      Array.isArray(remote) ? (remote as TrackEvent[]) : [],
-      this.queue,
-    );
-    this.queue = this.trimQueue(merged);
-    this.storage.set(QUEUE_KEY, this.queue);
+    if (this.persistQueue) {
+      const remote = this.storage.get(QUEUE_KEY);
+      const merged = mergeQueues(
+        Array.isArray(remote) ? (remote as TrackEvent[]) : [],
+        this.queue,
+      );
+      this.queue = this.trimQueue(merged);
+      this.storage.set(QUEUE_KEY, this.queue);
+    } else {
+      this.queue = this.trimQueue();
+    }
     this.broadcastQueue();
   }
 
@@ -728,7 +746,7 @@ export class Eventra {
       };
     }
 
-    if (typeof window !== "undefined") {
+    if (this.persistQueue && typeof window !== "undefined") {
       this.onStorageQueue = (e: StorageEvent) => {
         if (e.key !== QUEUE_KEY) return;
         this.loadAndMergeQueue();
