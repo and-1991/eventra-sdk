@@ -1,6 +1,6 @@
 {
   "name": "@eventra_dev/eventra-sdk",
-  "version": "1.2.42",
+  "version": "2.0.0",
   "description": "Production-grade analytics SDK for feature usage and product behavior — batching, retries, circuit breaker, runtime-aware (browser, Node, Edge, serverless).",
   "private": false,
   "publishConfig": {
