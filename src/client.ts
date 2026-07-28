@@ -388,7 +388,7 @@ export class Eventra {
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.runtime = detectRuntime();
 
-    this.fetch = options.fetchImpl ?? globalThis.fetch;
+    this.fetch = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
     if (!this.fetch) {
       throw new Error("Eventra: fetch not available — provide fetchImpl");
     }
