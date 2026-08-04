@@ -93,8 +93,8 @@ Eventra SDK adapts automatically:
 | Browser     | batching + persistence + retry         |
 | Node.js     | batching + retry                       |
 | Serverless  | immediate flush + retry                |
-| Edge        | lightweight batching                   |
-| Workers     | batching                               |
+| Edge        | batching + retry                       |
+| Anything else (e.g. Cloudflare Workers) | not distinctly detected — falls back to the same batching + retry path as Node.js |
 
 No config needed.
 
