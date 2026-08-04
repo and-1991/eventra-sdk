@@ -10,6 +10,7 @@
   <a href="https://github.com/and-1991/eventra-sdk/actions/workflows/test.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/and-1991/eventra-sdk/test.yml?branch=main&label=tests&style=flat-square&logo=vitest&logoColor=white"></a>
   <img alt="tests passing" src="https://img.shields.io/badge/tests-44%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="test suites" src="https://img.shields.io/badge/suites-8-brightgreen?style=flat-square">
+  <img alt="coverage" src="https://img.shields.io/badge/coverage-80.3%25-green?style=flat-square&logo=vitest&logoColor=white">
   <img alt="node" src="https://img.shields.io/node/v/@eventra_dev/eventra-sdk?style=flat-square&color=darkgreen&logo=node.js&logoColor=white">
   <a href="https://www.typescriptlang.org/"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-ready-blue?style=flat-square&logo=typescript&logoColor=white"></a>
   <img alt="license" src="https://img.shields.io/npm/l/@eventra_dev/eventra-sdk?style=flat-square&color=lightgrey">
@@ -373,6 +374,8 @@ Eventra SDK includes:
 ---
 
 ## Test Coverage
+
+**80.3% statement coverage** (78.8% branch, 77.6% function, 82.3% line — v8 provider, `pnpm test:coverage`).
 
 44 vitest tests across 8 suites cover the entire delivery pipeline:
 
