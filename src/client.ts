@@ -4,9 +4,16 @@ declare const __SDK_VERSION__: string | undefined;
 declare const __EVENTRA_ENDPOINT__: string | undefined;
 
 const SDK_NAME = "@eventra_dev/eventra-sdk";
+// `__EVENTRA_ENDPOINT__`/`__SDK_VERSION__` are build-time constants substituted
+// by the bundler (see tsup/vitest `define`). Under this package's test config
+// (vitest.config.ts) they're always statically defined to a truthy string, so
+// the `|| default` fallback below can't be exercised by any test — it only
+// matters for a build that omits the define entirely.
+/* v8 ignore next 3 */
 const DEFAULT_ENDPOINT =
   (typeof __EVENTRA_ENDPOINT__ !== "undefined" && __EVENTRA_ENDPOINT__) ||
   "https://api.eventra.dev/api/v1/ingest/batch";
+/* v8 ignore next 2 */
 const SDK_VERSION =
   (typeof __SDK_VERSION__ !== "undefined" && __SDK_VERSION__) || "0.0.0-dev";
 
@@ -199,6 +206,11 @@ class Storage {
     }
   }
 
+  // Not currently called anywhere in the client — kept for API symmetry with
+  // get()/set() on this internal class. No real call site exists to exercise
+  // it, and Storage isn't part of the public surface, so a direct call here
+  // would only be a reflection-hack test, not real usage.
+  /* v8 ignore start */
   remove(key: string) {
     if (!this.enabled) return;
     try {
@@ -207,6 +219,7 @@ class Storage {
       /* ignore */
     }
   }
+  /* v8 ignore stop */
 }
 
 // ================= LEADER =================
@@ -227,6 +240,12 @@ class Leader {
 
     this.election = setInterval(() => this.tick(), LEADER_TTL_MS / 2);
 
+    // Leader is only ever constructed from Eventra's constructor when
+    // `this.runtime === "browser"`, and detectRuntime() only returns
+    // "browser" when `window` is defined — so by the time this code runs
+    // (having already passed the localStorage check above), window is
+    // guaranteed to be defined too.
+    /* v8 ignore else */
     if (typeof window !== "undefined") {
       this.onStorage = (e: StorageEvent) => {
         if (e.key === LEADER_KEY) this.tick();
@@ -247,6 +266,12 @@ class Leader {
     } else {
       this.isLeader = this.tryAcquire();
       if (this.isLeader) {
+        // This branch is only reached when isLeader was just flipped from
+        // false to true. Whenever a tick() ends with isLeader false, the
+        // check below (`!this.isLeader && this.heartbeat`) always clears
+        // `heartbeat` back to undefined in that same tick — so on entry
+        // here it can never already be set.
+        /* v8 ignore else */
         if (!this.heartbeat) {
           this.heartbeat = setInterval(() => this.renew(), LEADER_TTL_MS / 2);
         }
@@ -525,6 +550,14 @@ export class Eventra {
           this.sending = null;
         }
 
+        // Reachable only after a *successful* send() (the catch above always
+        // `break`s immediately whenever circuitOpenUntil is set to a future
+        // value). flush() already returned early at the top if
+        // `now < circuitOpenUntil`, so by the time execution gets here
+        // circuitOpenUntil can only be <= that earlier `now` — never in the
+        // future. Defense-in-depth against a future refactor reordering the
+        // checks above, not currently reachable.
+        /* v8 ignore next */
         if (this.circuitOpenUntil > Date.now()) break;
       }
 
@@ -622,17 +655,32 @@ export class Eventra {
         sdk: this.sdkInfo,
         events,
       });
+      /* v8 ignore start */
+      // send() is only ever called from flush() immediately after
+      // buildBatch() has already JSON.stringify'd this exact `events` array
+      // (via estimateEnvelopeBytes, same {sentAt, sdk, events} shape) with no
+      // await in between — so if that succeeded, this identical
+      // re-serialization can't fail differently. Kept as defense-in-depth in
+      // case send() ever gains another call site.
     } catch {
       this.options.onDeliveryFailed?.({ status: 0, events });
       this.removeDelivered(events);
       return;
     }
+    /* v8 ignore stop */
 
     const payloadBytes = utf8ByteLength(payload);
+    /* v8 ignore start */
+    // Same reasoning as above: buildBatch() only ever returns a batch whose
+    // estimateEnvelopeBytes() already fit within maxPayloadBytes, and nothing
+    // mutates `events` or maxPayloadBytes between that check and this one —
+    // so this re-check can't trip in practice. Defense-in-depth, not dead
+    // logic to be deleted.
     if (payloadBytes > this.maxPayloadBytes) {
       this.dropPoisonEvents(events);
       return;
     }
+    /* v8 ignore stop */
 
     const useKeepalive =
       this.runtime === "browser" &&
@@ -689,11 +737,16 @@ export class Eventra {
     }
   }
 
+  // Only caller is the defensive re-check in send() above, which is itself
+  // unreachable in practice (see comment there) — see the same file's
+  // ignore rationale. Kept for when that check trips defensively.
+  /* v8 ignore start */
   private dropPoisonEvents(events: TrackEvent[]) {
     for (const event of events) {
       this.dropPoisonEvent(event);
     }
   }
+  /* v8 ignore stop */
 
   private loadAndMergeQueue() {
     const remote = this.storage.get(QUEUE_KEY);

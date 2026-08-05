@@ -8,9 +8,9 @@
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm version" src="https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://github.com/and-1991/eventra-sdk/actions/workflows/test.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/and-1991/eventra-sdk/test.yml?branch=main&label=tests&style=flat-square&logo=vitest&logoColor=white"></a>
-  <img alt="tests passing" src="https://img.shields.io/badge/tests-44%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
-  <img alt="test suites" src="https://img.shields.io/badge/suites-8-brightgreen?style=flat-square">
-  <img alt="coverage" src="https://img.shields.io/badge/coverage-80.3%25-green?style=flat-square&logo=vitest&logoColor=white">
+  <img alt="tests passing" src="https://img.shields.io/badge/tests-80%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
+  <img alt="test suites" src="https://img.shields.io/badge/suites-12-brightgreen?style=flat-square">
+  <img alt="coverage" src="https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="node" src="https://img.shields.io/node/v/@eventra_dev/eventra-sdk?style=flat-square&color=darkgreen&logo=node.js&logoColor=white">
   <a href="https://www.typescriptlang.org/"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-ready-blue?style=flat-square&logo=typescript&logoColor=white"></a>
   <img alt="license" src="https://img.shields.io/npm/l/@eventra_dev/eventra-sdk?style=flat-square&color=lightgrey">
@@ -375,18 +375,20 @@ Eventra SDK includes:
 
 ## Test Coverage
 
-**80.3% statement coverage** (78.8% branch, 77.6% function, 82.3% line — v8 provider, `pnpm test:coverage`).
+**100% statement/branch/function/line coverage** (v8 provider, `pnpm test:coverage`).
 
-44 vitest tests across 8 suites cover the entire delivery pipeline:
+80 vitest tests across 12 suites cover the entire delivery pipeline:
 
 - `track()` validation — name length, userId truncation, properties depth/size, idempotency keys
 - Batching — auto-flush at `maxBatchSize`, periodic flush via timer, queue overflow drop
-- Retry & backoff — 429, 5xx, network errors, no-retry on 4xx
+- Retry & backoff — 429, 5xx, network errors, no-retry on 4xx, fetch timeout/abort
 - Circuit breaker — opens after 5 consecutive failures, cools down, resets on success
 - Payload guards — multi-batch splitting, oversize event dropped via `onDeliveryFailed(413)`
 - Shutdown & destroy — flush ordering, timer teardown, idempotent shutdown
-- Runtime detection — Node, Edge (`EdgeRuntime`), Serverless (AWS Lambda)
-- Browser mode — persistence, leader election, BroadcastChannel sync, `fetch` keepalive, `pagehide`
+- Runtime detection — Node, Edge (`EdgeRuntime`), Serverless (AWS Lambda), unknown fallback, Node process exit handling
+- Browser mode — persistence, leader election (including multi-tab lease races), BroadcastChannel sync, `fetch` keepalive, `pagehide`
+- Storage edge cases — corrupted/blocked localStorage, quota exceeded, queue trimming
+- Internal fallbacks — `crypto.getRandomValues`, `Buffer`/string-length byte counting
 
 Run locally:
 

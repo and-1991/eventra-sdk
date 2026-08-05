@@ -33,6 +33,16 @@ describe("track() validation", () => {
     expect(calls.length).toBe(0);
   });
 
+  it("drops a nullish event name (a plain-JS caller ignoring the TS signature) without throwing", () => {
+    const onEventsDropped = vi.fn();
+    const { sdk, calls } = makeSdk({ onEventsDropped });
+    expect(() => sdk.track(undefined as unknown as string)).not.toThrow();
+    expect(() => sdk.track(null as unknown as string)).not.toThrow();
+    expect(onEventsDropped).toHaveBeenCalledTimes(2);
+    expect(onEventsDropped).toHaveBeenCalledWith(1);
+    expect(calls.length).toBe(0);
+  });
+
   it("truncates name longer than 64 chars instead of throwing", async () => {
     const { sdk, calls } = makeSdk();
     expect(() => sdk.track("a".repeat(65))).not.toThrow();

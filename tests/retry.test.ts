@@ -140,4 +140,53 @@ describe("retry / backoff", () => {
     await sdk.flush();
     expect(calls2[0].body.events.map((e) => e.name)).toEqual(["a"]);
   });
+
+  it("retries on a non-2xx/3xx status that isn't 429/5xx/4xx (falls through to the generic !res.ok retry)", async () => {
+    const { fetchImpl, calls } = createMockFetch({ responses: [304, 200] });
+    const sdk = new Eventra({
+      apiKey: "k",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      fetchImpl,
+      maxRetries: 3,
+      retryBaseDelayMs: 1,
+    });
+    active.push(sdk);
+
+    sdk.track("a");
+    await sdk.flush();
+    expect(calls.length).toBe(2);
+  });
+
+  it("retries after the fetch timeout aborts an in-flight request", async () => {
+    vi.useFakeTimers();
+    const calls: unknown[] = [];
+    const fetchImpl = vi.fn((_url: string, init?: RequestInit) => {
+      calls.push(init);
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          const err = new Error("aborted") as Error & { name: string };
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const sdk = new Eventra({
+      apiKey: "k",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      fetchImpl,
+      maxRetries: 1, // exhausts on the very first timeout
+      retryBaseDelayMs: 1,
+    });
+    active.push(sdk);
+
+    sdk.track("a");
+    const flushPromise = sdk.flush();
+    await vi.advanceTimersByTimeAsync(5000); // FETCH_TIMEOUT_MS
+    await flushPromise;
+
+    expect(calls.length).toBe(1);
+  });
 });
