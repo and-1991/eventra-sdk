@@ -36,6 +36,21 @@ class FakeWindow {
   }
 }
 
+class FakeDocument {
+  visibilityState: "visible" | "hidden" = "visible";
+  private listeners = new Map<string, Set<Listener>>();
+  addEventListener(type: string, fn: Listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type)!.add(fn);
+  }
+  removeEventListener(type: string, fn: Listener) {
+    this.listeners.get(type)?.delete(fn);
+  }
+  dispatch(type: string, payload: unknown) {
+    for (const fn of this.listeners.get(type) ?? []) fn(payload);
+  }
+}
+
 class FakeBroadcastChannel {
   static channels = new Map<string, Set<FakeBroadcastChannel>>();
   onmessage: ((e: { data: unknown }) => void) | null = null;
@@ -58,7 +73,7 @@ class FakeBroadcastChannel {
 export type BrowserEnvHandle = {
   window: FakeWindow;
   storage: FakeLocalStorage;
-  document: { visibilityState: "visible" | "hidden" };
+  document: FakeDocument;
   restore: () => void;
 };
 
@@ -74,7 +89,7 @@ export function installBrowserEnv(): BrowserEnvHandle {
 
   const window = new FakeWindow();
   const storage = new FakeLocalStorage();
-  const document = { visibilityState: "visible" as "visible" | "hidden" };
+  const document = new FakeDocument();
 
   g.window = window as unknown;
   g.localStorage = storage as unknown;

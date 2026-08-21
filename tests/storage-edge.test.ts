@@ -193,13 +193,30 @@ describe("visibilitychange exit handling", () => {
 
     sdk.track("a");
     env.document.visibilityState = "visible";
-    env.window.dispatch("visibilitychange", {});
+    env.document.dispatch("visibilitychange", {});
     await Promise.resolve();
     expect(calls.length).toBe(0);
 
     env.document.visibilityState = "hidden";
-    env.window.dispatch("visibilitychange", {});
+    env.document.dispatch("visibilitychange", {});
     await vi.waitFor(() => expect(calls.length).toBe(1));
+  });
+
+  it("registers the visibilitychange listener on document, not window (the native event never fires on window)", async () => {
+    const { fetchImpl, calls } = createMockFetch({ responses: [200] });
+    const sdk = new Eventra({
+      apiKey: "k",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      fetchImpl,
+    });
+    active.push(sdk);
+
+    sdk.track("a");
+    env.document.visibilityState = "hidden";
+    env.window.dispatch("visibilitychange", {});
+    await Promise.resolve();
+    expect(calls.length).toBe(0); // dispatching on window must NOT trigger the flush
   });
 });
 

@@ -85,7 +85,8 @@ function truncate(value: string | undefined, max: number): string | undefined {
  * and truncates to `MAX_EVENT_NAME`, matching the documented behavior.
  */
 function normalizeEventName(name: string): string | null {
-  const trimmed = (name ?? "").trim();
+  if (typeof name !== "string") return null;
+  const trimmed = name.trim();
   if (!trimmed) return null;
   return trimmed.length > MAX_EVENT_NAME ? trimmed.slice(0, MAX_EVENT_NAME) : trimmed;
 }
@@ -825,11 +826,13 @@ export class Eventra {
       void this.flush();
     };
 
-    window.addEventListener("visibilitychange", handler);
+    // `visibilitychange` only ever fires on `document`, never on `window` —
+    // `pagehide` is the opposite, a `window`-only event.
+    document.addEventListener("visibilitychange", handler);
     window.addEventListener("pagehide", pageHide);
 
     this.exitHandlers.push(() => {
-      window.removeEventListener("visibilitychange", handler);
+      document.removeEventListener("visibilitychange", handler);
       window.removeEventListener("pagehide", pageHide);
     });
   }

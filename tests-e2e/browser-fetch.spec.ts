@@ -90,4 +90,51 @@ test.describe("real browser fetch", () => {
       server.close();
     }
   });
+
+  test("visibilitychange flushes via the real document target, not window", async ({ page }) => {
+    const { server, url } = await startServer();
+
+    try {
+      let requestCount = 0;
+      await page.route("https://api.eventra.dev/**", (route) => {
+        requestCount++;
+        return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      });
+
+      await page.goto(url);
+
+      await page.evaluate(async () => {
+        const mod = await (window as unknown as { __eventraReady: Promise<any> })
+          .__eventraReady;
+        const sdk = new mod.Eventra({
+          apiKey: "test-key",
+          disableTimer: true,
+          autoFlushOnExit: false,
+          maxRetries: 1,
+        });
+        (window as unknown as { __sdk: unknown }).__sdk = sdk;
+
+        sdk.track("e2e.visibility");
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          get: () => "hidden",
+        });
+      });
+
+      // `window` is not `document` — a native browser only ever dispatches
+      // `visibilitychange` on `document`, so firing it on `window` must be a
+      // no-op if the SDK is listening on the right target.
+      await page.evaluate(() => window.dispatchEvent(new Event("visibilitychange")));
+      await page.waitForTimeout(100);
+      expect(requestCount).toBe(0);
+
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await page.waitForTimeout(100);
+      expect(requestCount).toBe(1);
+
+      await page.evaluate(() => (window as unknown as { __sdk: { destroy(): void } }).__sdk.destroy());
+    } finally {
+      server.close();
+    }
+  });
 });

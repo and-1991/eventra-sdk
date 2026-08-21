@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm version" src="https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://github.com/and-1991/eventra-sdk/actions/workflows/test.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/and-1991/eventra-sdk/test.yml?branch=main&label=tests&style=flat-square&logo=vitest&logoColor=white"></a>
-  <img alt="tests passing" src="https://img.shields.io/badge/tests-80%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
+  <img alt="tests passing" src="https://img.shields.io/badge/tests-82%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="test suites" src="https://img.shields.io/badge/suites-12-brightgreen?style=flat-square">
   <img alt="coverage" src="https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="node" src="https://img.shields.io/node/v/@eventra_dev/eventra-sdk?style=flat-square&color=darkgreen&logo=node.js&logoColor=white">
@@ -422,6 +422,8 @@ pnpm --filter @eventra_dev/eventra-sdk test:coverage
   ]
 }
 ```
+
+`idempotencyKey` is generated once per event and stays identical across every retry attempt of that event — delivery is **at-least-once, not exactly-once**. A retried batch resends the same events with the same keys, and under a slow network a request can be fully received and processed by the ingestion endpoint even after the SDK's own fetch timed out client-side and moved on to a retry — the backend seeing the same `idempotencyKey` more than once is expected, not a sign of a bug, and should be deduplicated on that key rather than on request count.
 
 Limits enforced by the SDK at `track()` time:
 
