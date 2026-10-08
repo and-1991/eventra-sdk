@@ -68,6 +68,15 @@ describe("track() validation", () => {
     expect(calls[0].body.events[0].name).toBe("user.signup");
   });
 
+  it("sends names with spaces and colons unchanged (third-party style names)", async () => {
+    const { sdk, calls } = makeSdk();
+    sdk.track("App: User Sign Up");
+    sdk.track("  Order Completed  ");
+    await sdk.flush();
+    const names = calls.flatMap((c) => c.body.events.map((e: { name: string }) => e.name));
+    expect(names).toEqual(["App: User Sign Up", "Order Completed"]);
+  });
+
   it("truncates userId to 120 chars", async () => {
     const { sdk, calls } = makeSdk();
     sdk.track("evt", { userId: "u".repeat(200) });

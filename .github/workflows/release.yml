@@ -9,8 +9,8 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
-      id-token: write
+      contents: write # tag and GitHub release
+      id-token: write # npm provenance
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +34,53 @@ jobs:
         env:
           EVENTRA_ENDPOINT: ${{ secrets.EVENTRA_ENDPOINT }}
 
+      - name: Read package name and version
+        id: pkg
+        run: |
+          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # A push that does not bump the version (docs, CI) must neither fail on "cannot publish over the
+      # previously published version" nor create a second tag or release. The token is only needed so
+      # that setup-node's .npmrc does not break `npm view`.
+      - name: Check whether this version is already on npm
+        id: npm
+        run: |
+          published=$(npm view "$NAME@$VERSION" version 2>/dev/null || true)
+          if [ "$published" = "$VERSION" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$NAME@$VERSION is already on npm, skipping publish and release"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # --provenance signs the package with this workflow's identity (id-token: write above), so npm shows
+      # which repository, commit and workflow run built it. It works because this workflow runs in the
+      # repository named in package.json.
       - name: Publish to npm
-        run: npm publish
+        if: steps.npm.outputs.published != 'true'
+        run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag and create a GitHub release
+        if: steps.npm.outputs.published != 'true'
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists, nothing to do"
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "$NAME $VERSION" \
+              --notes "Published to npm: https://www.npmjs.com/package/$NAME/v/$VERSION" \
+              --generate-notes
+          fi
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          GH_TOKEN: ${{ github.token }}

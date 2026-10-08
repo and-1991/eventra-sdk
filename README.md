@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm version" src="https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://github.com/and-1991/eventra-sdk/actions/workflows/test.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/and-1991/eventra-sdk/test.yml?branch=main&label=tests&style=flat-square&logo=vitest&logoColor=white"></a>
-  <img alt="tests passing" src="https://img.shields.io/badge/tests-82%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
+  <img alt="tests passing" src="https://img.shields.io/badge/tests-86%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="test suites" src="https://img.shields.io/badge/suites-12-brightgreen?style=flat-square">
   <img alt="coverage" src="https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="node" src="https://img.shields.io/node/v/@eventra_dev/eventra-sdk?style=flat-square&color=darkgreen&logo=node.js&logoColor=white">
@@ -377,7 +377,7 @@ Eventra SDK includes:
 
 **100% statement/branch/function/line coverage** (v8 provider, `pnpm test:coverage`).
 
-80 vitest tests across 12 suites cover the entire delivery pipeline:
+86 vitest tests across 13 suites cover the entire delivery pipeline:
 
 - `track()` validation — name length, userId truncation, properties depth/size, idempotency keys
 - Batching — auto-flush at `maxBatchSize`, periodic flush via timer, queue overflow drop
@@ -447,4 +447,4 @@ https://eventra.dev/docs
 
 ## License
 
-MIT
+MIT, copyright (c) 2026 [and-1991](https://github.com/and-1991). See [LICENSE](LICENSE).
