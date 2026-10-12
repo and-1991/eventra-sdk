@@ -1,4 +1,11 @@
 import { TrackerOptions, TrackEvent, SdkInfo, TrackOptions } from "./types";
+import {
+  Diagnostics,
+  DiagnosticsReport,
+  FailedReason,
+  MemoryStore,
+  SharedStore,
+} from "./diagnostics";
 
 declare const __SDK_VERSION__: string | undefined;
 declare const __EVENTRA_ENDPOINT__: string | undefined;
@@ -20,6 +27,7 @@ const SDK_VERSION =
 const LEADER_KEY = "__eventra_leader__";
 const LEADER_TTL_MS = 4000;
 const QUEUE_KEY = "__eventra_q__";
+const DIAGNOSTICS_KEY = "__eventra_d__";
 const CHANNEL_NAME = "eventra-sdk";
 
 const MAX_EVENT_NAME = 64;
@@ -31,6 +39,22 @@ const DEFAULT_MAX_RETRY_DELAY_MS = 30_000;
 const FETCH_TIMEOUT_MS = 5000;
 const CIRCUIT_FAILURE_THRESHOLD = 5;
 const CIRCUIT_COOLDOWN_MS = 5000;
+const CIRCUIT_COOLDOWN_MAX_MS = 60_000;
+const RETRY_AFTER_MAX_MS = 30_000;
+// How long a burst of track() calls is coalesced into one localStorage write.
+// A crash inside this window (not a normal tab close: pagehide, hidden and
+// shutdown() write immediately) can lose the events tracked in it.
+const PERSIST_DEBOUNCE_MS = 50;
+// A queued event kept in localStorage longer than this is dropped when it is
+// loaded again. The server only remembers idempotency keys for 30 days, so an
+// event that was delivered during pagehide (whose response is never seen) and
+// is re-sent by a visitor who returns after a long time could otherwise be
+// accepted a second time.
+const PERSISTED_EVENT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+// Keys of events already delivered, remembered so a stale copy in
+// localStorage or from another tab cannot put them back in the queue.
+const DELIVERED_KEYS_MAX = 10_000;
 
 let activeInstances = 0;
 
@@ -91,15 +115,21 @@ function normalizeEventName(name: string): string | null {
   return trimmed.length > MAX_EVENT_NAME ? trimmed.slice(0, MAX_EVENT_NAME) : trimmed;
 }
 
+// `attempt` is the 0-based index of the attempt that just failed, so the first
+// retry waits about `base`, the second about `base * 2`, and so on.
 function backoffMs(attempt: number, base: number): number {
   const exp = Math.min(DEFAULT_MAX_RETRY_DELAY_MS, base * 2 ** attempt);
   const jitter = exp * (0.5 + Math.random() * 0.5);
   return jitter;
 }
 
+// one encoder, created on first use (the global is still checked on every call)
+let textEncoder: TextEncoder | undefined;
+
 function utf8ByteLength(value: string): number {
   if (typeof TextEncoder !== "undefined") {
-    return new TextEncoder().encode(value).length;
+    textEncoder ??= new TextEncoder();
+    return textEncoder.encode(value).length;
   }
   const g = globalThis as { Buffer?: { byteLength: (s: string, enc: string) => number } };
   if (g.Buffer) {
@@ -126,6 +156,14 @@ function mergeQueues(...queues: TrackEvent[][]): TrackEvent[] {
 function validateProperties(
   properties: Record<string, unknown>,
 ): Record<string, unknown> {
+  // Nothing to walk or measure for an empty object (the common case).
+  let hasKeys = false;
+  for (const _ in properties) {
+    hasKeys = true;
+    break;
+  }
+  if (!hasKeys) return properties;
+
   const depth = (obj: unknown, level: number): void => {
     if (level > MAX_PROPERTIES_DEPTH) {
       throw new Error(`Eventra: properties exceed max depth (${MAX_PROPERTIES_DEPTH})`);
@@ -152,22 +190,38 @@ function validateProperties(
   return properties;
 }
 
-function estimateEnvelopeBytes(
-  events: TrackEvent[],
-  sdk: SdkInfo,
-  sentAt: string,
-): number {
-  return utf8ByteLength(
-    JSON.stringify({
-      sentAt,
-      sdk,
-      events,
-    }),
-  );
+// Seconds ("120") or an HTTP date; anything else (or a past date) is ignored.
+// Capped so one odd header cannot park the queue for a long time.
+function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  let ms: number;
+  if (/^\d+$/.test(trimmed)) {
+    ms = Number(trimmed) * 1000;
+  } else {
+    const at = Date.parse(trimmed);
+    if (Number.isNaN(at)) return undefined;
+    ms = at - Date.now();
+  }
+  if (!(ms > 0)) return undefined;
+  return Math.min(ms, RETRY_AFTER_MAX_MS);
 }
 
+type PreparedBatch = {
+  events: TrackEvent[];
+  // counters that travel with this batch (optional envelope metadata)
+  diagnostics?: DiagnosticsReport;
+  // each event serialized exactly once, joined into the payload by send()
+  json: string[];
+  bytes: number;
+};
+
 class RetryableDeliveryError extends Error {
-  constructor(message = "retryable delivery error") {
+  constructor(
+    message = "retryable delivery error",
+    readonly retryAfterMs?: number,
+    readonly reason: FailedReason = "server_error",
+  ) {
     super(message);
     this.name = "RetryableDeliveryError";
   }
@@ -382,6 +436,8 @@ export class Eventra {
   private retries: number;
   private retryDelay: number;
   private persistQueue: boolean;
+  private diagnosticsEnabled: boolean;
+  private diagnostics: Diagnostics;
 
   private timer?: ReturnType<typeof setInterval>;
 
@@ -393,6 +449,19 @@ export class Eventra {
   private failureCount = 0;
   private circuitOpenUntil = 0;
   private circuitHalfOpen = false;
+  // consecutive times the circuit opened without a success in between; drives
+  // the exponential cooldown
+  private circuitOpenCount = 0;
+
+  private flushPromise: Promise<void> | null = null;
+  private persistTimer?: ReturnType<typeof setTimeout>;
+  private persistDirty = false;
+  private deliveredKeys = new Set<string>();
+  // a 429/5xx Retry-After that outlives the last attempt also delays the next
+  // flush (timer, size trigger, manual); shutdown() ignores it
+  private nextFlushAt = 0;
+  // 0 = no limit; set by shutdown() so retries and sleeps cannot overrun it
+  private shutdownDeadline = 0;
 
   private sdkInfo: SdkInfo;
   private options: TrackerOptions;
@@ -429,6 +498,17 @@ export class Eventra {
     // across reloads, but let privacy-sensitive integrators opt out of ever
     // writing that data to localStorage.
     this.persistQueue = options.persistQueue ?? true;
+
+    // Counters of what could not be delivered travel with the next successful
+    // batch; numbers only, never event content. Off with `diagnostics: false`.
+    this.diagnosticsEnabled = options.diagnostics !== false;
+    const shared = this.runtime === "browser" && this.persistQueue;
+    this.diagnostics = new Diagnostics(
+      shared ? new SharedStore(this.storage) : new MemoryStore(),
+      DIAGNOSTICS_KEY,
+      uuidV4,
+      shared ? () => this.scheduleDiagnosticsSync() : undefined,
+    );
 
     this.sdkInfo = {
       name: SDK_NAME,
@@ -467,6 +547,7 @@ export class Eventra {
 
     const eventName = normalizeEventName(name);
     if (eventName === null) {
+      this.recordDiagnostic("invalid_event");
       this.options.onEventsDropped?.(1);
       return;
     }
@@ -477,11 +558,13 @@ export class Eventra {
     } catch {
       // Oversized/too-deep properties can't be safely truncated — drop the
       // event instead of throwing out of a fire-and-forget call site.
+      this.recordDiagnostic("invalid_event");
       this.options.onEventsDropped?.(1);
       return;
     }
 
     if (this.queue.length >= this.maxQueue) {
+      this.recordDiagnostic("queue_full");
       this.options.onEventsDropped?.(1);
       return;
     }
@@ -497,7 +580,8 @@ export class Eventra {
     this.queue.push(event);
 
     if (this.runtime === "browser") {
-      this.syncQueue();
+      this.schedulePersist();
+      this.broadcast({ type: "queue-add", events: [event] });
     }
 
     if (this.queue.length >= this.maxBatch) {
@@ -510,8 +594,15 @@ export class Eventra {
   }
 
   async flush(): Promise<void> {
+    return this.flushNow(false);
+  }
+
+  // `force` skips only the Retry-After delay (the last chance at shutdown);
+  // the circuit breaker still applies
+  private async flushNow(force: boolean): Promise<void> {
     if (this.inFlight || this.destroyed) return;
     if (!this.queue.length && !this.sending?.length) return;
+    if (!force && Date.now() < this.nextFlushAt) return;
 
     if (this.leader && !this.leader.canSend()) return;
 
@@ -525,23 +616,56 @@ export class Eventra {
 
     this.inFlight = true;
 
+    const run = this.runFlush();
+    this.flushPromise = run;
+
+    try {
+      await run;
+    } finally {
+      this.flushPromise = null;
+    }
+  }
+
+  private async runFlush(): Promise<void> {
     try {
       while (this.queue.length > 0) {
-        const batch = this.buildBatch();
-        if (!batch.length) break;
+        const report = this.diagnosticsEnabled
+          ? this.diagnostics.claim(this.queue.length, SDK_VERSION)
+          : null;
+        const batch = this.buildBatch(report);
+        if (!batch.events.length) break;
 
-        this.sending = batch;
+        this.sending = batch.events;
 
         try {
-          await this.send(batch);
-          this.removeDelivered(batch);
+          const accepted = await this.send(batch);
+          // acknowledged only by a 2xx for the batch that carried the report
+          if (accepted && batch.diagnostics) {
+            this.diagnostics.ack(batch.diagnostics.reportId);
+          }
+          this.removeDelivered(batch.events);
+          this.nextFlushAt = 0;
           this.failureCount = 0;
           this.circuitHalfOpen = false;
+          this.circuitOpenCount = 0;
         } catch (err) {
           if (err instanceof RetryableDeliveryError) {
+            this.recordDiagnostic(err.reason);
+            if (err.retryAfterMs) {
+              this.nextFlushAt = Date.now() + err.retryAfterMs;
+            }
             this.failureCount++;
             if (this.circuitHalfOpen || this.failureCount >= CIRCUIT_FAILURE_THRESHOLD) {
-              this.circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+              this.recordDiagnostic("circuit_open");
+              // Exponential cooldown, capped. A failed half-open probe counts
+              // as another opening, so an outage is probed less and less often.
+              const cooldown = Math.min(
+                CIRCUIT_COOLDOWN_MAX_MS,
+                CIRCUIT_COOLDOWN_MS * 2 ** this.circuitOpenCount,
+              );
+              this.circuitOpenCount++;
+              this.circuitOpenUntil =
+                Date.now() + Math.max(cooldown, err.retryAfterMs ?? 0);
               this.circuitHalfOpen = false;
             }
             break;
@@ -561,24 +685,45 @@ export class Eventra {
         /* v8 ignore next */
         if (this.circuitOpenUntil > Date.now()) break;
       }
-
-      if (this.runtime === "browser") {
-        this.syncQueue();
-      }
     } finally {
       this.inFlight = false;
     }
   }
 
-  /** Flush pending events, then tear down timers and listeners */
+  /**
+   * Flush pending events, then tear down timers and listeners. Gives up after
+   * `shutdownTimeoutMs` (default 10 s) so a dead or rate-limited server cannot
+   * hold a SIGTERM shutdown past a typical grace period.
+   */
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+
+    const budget = this.options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    this.shutdownDeadline = Date.now() + Math.max(0, budget);
+
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const outOfTime = new Promise<void>((resolve) => {
+      budgetTimer = setTimeout(resolve, Math.max(0, budget));
+      (budgetTimer as { unref?: () => void }).unref?.();
+    });
+
     try {
-      await this.flush();
+      await Promise.race([this.flushEverything(), outOfTime]);
     } finally {
+      clearTimeout(budgetTimer);
       this.destroy();
     }
+  }
+
+  private async flushEverything(): Promise<void> {
+    // A flush may already be running (timer, size trigger): flush() would
+    // return immediately and destroy() would drop what is still queued, so
+    // let it finish and then send whatever is left.
+    if (this.flushPromise) {
+      await this.flushPromise;
+    }
+    await this.flushNow(true);
   }
 
   destroy() {
@@ -587,6 +732,9 @@ export class Eventra {
     activeInstances = Math.max(0, activeInstances - 1);
 
     if (this.timer) clearInterval(this.timer);
+
+    // write any pending queue state before the listeners go away
+    this.persistNow();
 
     this.leader?.destroy();
 
@@ -604,82 +752,110 @@ export class Eventra {
     }
   }
 
-  private buildBatch(): TrackEvent[] {
-    const batch: TrackEvent[] = [];
+  private buildBatch(report: DiagnosticsReport | null): PreparedBatch {
+    const events: TrackEvent[] = [];
+    const json: string[] = [];
     const sentAt = new Date().toISOString();
+    // size of the envelope with no events, `[]` included; every event then adds
+    // its own bytes plus one comma between neighbours (equal to stringifying the
+    // whole envelope, without redoing it for every candidate)
+    const envelopeBytes = (withReport: boolean) =>
+      utf8ByteLength(
+        JSON.stringify({
+          sentAt,
+          sdk: this.sdkInfo,
+          ...(withReport && report ? { diagnostics: report } : {}),
+          events: [],
+        }),
+      );
+    let withReport = report !== null;
+    let bytes = envelopeBytes(withReport);
     let index = 0;
 
-    while (index < this.queue.length && batch.length < this.maxBatch) {
+    while (index < this.queue.length && events.length < this.maxBatch) {
       const event = this.queue[index];
-      const candidate = [...batch, event];
-      const bytes = estimateEnvelopeBytes(candidate, this.sdkInfo, sentAt);
+      const eventJson = JSON.stringify(event);
+      const total = bytes + utf8ByteLength(eventJson) + (events.length ? 1 : 0);
 
-      if (bytes > this.maxPayloadBytes) {
-        if (batch.length === 0) {
-          const poisonKey = event.idempotencyKey;
-          this.dropPoisonEvent(event);
-          if (this.queue[index]?.idempotencyKey === poisonKey) {
-            index++;
+      if (total > this.maxPayloadBytes) {
+        if (events.length === 0) {
+          if (withReport) {
+            // the report itself may be what does not fit: send this batch
+            // without it (it stays pending) before judging the event
+            withReport = false;
+            bytes = envelopeBytes(false);
+            continue;
           }
+          // removed from this.queue, so `index` now points at the next event;
+          // the following event may be small enough to carry the report
+          this.dropPoisonEvent(event);
+          withReport = report !== null;
+          bytes = envelopeBytes(withReport);
           continue;
         }
         break;
       }
 
-      batch.push(event);
+      events.push(event);
+      json.push(eventJson);
+      bytes = total;
       index++;
     }
 
-    return batch;
+    return {
+      events,
+      json,
+      bytes,
+      diagnostics: withReport && report ? report : undefined,
+    };
   }
 
   private dropPoisonEvent(event: TrackEvent) {
+    this.recordDiagnostic("too_large");
     this.removeDelivered([event]);
     this.options.onEventsDropped?.(1);
     this.options.onDeliveryFailed?.({ status: 413, events: [event] });
-
-    if (this.runtime === "browser") {
-      this.syncQueue();
-    }
   }
 
   private removeDelivered(batch: TrackEvent[]) {
     const keys = new Set(batch.map((e) => e.idempotencyKey));
     this.queue = this.queue.filter((e) => !keys.has(e.idempotencyKey));
+
+    if (this.runtime === "browser") {
+      this.rememberDelivered(keys);
+      this.schedulePersist();
+      this.broadcast({ type: "delivered", keys: [...keys] });
+    }
   }
 
-  private async send(events: TrackEvent[]) {
-    let payload: string;
-    try {
-      payload = JSON.stringify({
+  // Resolves true only when the server answered 2xx for a payload that
+  // carried the diagnostics report (the only case that acknowledges it).
+  private async send(batch: PreparedBatch): Promise<boolean> {
+    const { events } = batch;
+    let carriesDiagnostics = batch.diagnostics !== undefined;
+    // same shape and key order as JSON.stringify({ sentAt, sdk, events }), with
+    // every event serialized once, in buildBatch()
+    const buildPayload = (withDiagnostics: boolean) => {
+      const head = JSON.stringify({
         sentAt: new Date().toISOString(),
         sdk: this.sdkInfo,
-        events,
+        ...(withDiagnostics && batch.diagnostics
+          ? { diagnostics: batch.diagnostics }
+          : {}),
       });
-      /* v8 ignore start */
-      // send() is only ever called from flush() immediately after
-      // buildBatch() has already JSON.stringify'd this exact `events` array
-      // (via estimateEnvelopeBytes, same {sentAt, sdk, events} shape) with no
-      // await in between — so if that succeeded, this identical
-      // re-serialization can't fail differently. Kept as defense-in-depth in
-      // case send() ever gains another call site.
-    } catch {
-      this.options.onDeliveryFailed?.({ status: 0, events });
-      this.removeDelivered(events);
-      return;
-    }
-    /* v8 ignore stop */
+      return `${head.slice(0, -1)},"events":[${batch.json.join(",")}]}`;
+    };
+    let payload = buildPayload(carriesDiagnostics);
 
-    const payloadBytes = utf8ByteLength(payload);
+    const payloadBytes = batch.bytes;
     /* v8 ignore start */
-    // Same reasoning as above: buildBatch() only ever returns a batch whose
-    // estimateEnvelopeBytes() already fit within maxPayloadBytes, and nothing
-    // mutates `events` or maxPayloadBytes between that check and this one —
-    // so this re-check can't trip in practice. Defense-in-depth, not dead
-    // logic to be deleted.
+    // buildBatch() only ever returns a batch whose size already fits within
+    // maxPayloadBytes, and nothing mutates `events` or maxPayloadBytes between
+    // that check and this one, so this re-check can't trip in practice.
+    // Defense-in-depth, not dead logic to be deleted.
     if (payloadBytes > this.maxPayloadBytes) {
       this.dropPoisonEvents(events);
-      return;
+      return false;
     }
     /* v8 ignore stop */
 
@@ -689,11 +865,20 @@ export class Eventra {
       document.visibilityState === "hidden" &&
       payloadBytes <= this.maxPayloadBytes;
 
-    const maxAttempts = Math.max(1, this.retries);
+    // A half-open breaker lets exactly one request through as a probe: no
+    // retries while we don't know yet whether the endpoint is back.
+    const maxAttempts = this.circuitHalfOpen ? 1 : Math.max(1, this.retries);
+    // a server that rejects the unknown `diagnostics` field answers 400/422;
+    // the batch is then sent once more without it
+    let strippedDiagnostics = false;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      const attemptTimeoutMs =
+        this.shutdownDeadline > 0
+          ? Math.max(1, Math.min(FETCH_TIMEOUT_MS, this.shutdownDeadline - Date.now()))
+          : FETCH_TIMEOUT_MS;
+      const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
 
       try {
         const res = await this.fetch(this.endpoint, {
@@ -708,34 +893,65 @@ export class Eventra {
         });
 
         if (res.status === 429 || res.status >= 500) {
-          throw new RetryableDeliveryError();
+          throw new RetryableDeliveryError(
+            "retryable delivery error",
+            parseRetryAfterMs(res.headers?.get?.("retry-after")),
+            res.status === 429 ? "rate_limited" : "server_error",
+          );
         }
 
         if (res.status >= 400 && res.status < 500) {
+          if (carriesDiagnostics && (res.status === 400 || res.status === 422)) {
+            // maybe an older server that does not know the field: events must
+            // not be lost over it, so try again without it (not a new attempt)
+            carriesDiagnostics = false;
+            strippedDiagnostics = true;
+            payload = buildPayload(false);
+            attempt--;
+            continue;
+          }
+          this.recordDiagnostic("rejected", events.length);
           this.options.onDeliveryFailed?.({ status: res.status, events });
           this.removeDelivered(events);
-          return;
+          return false;
         }
 
         if (!res.ok) {
           throw new RetryableDeliveryError();
         }
 
-        return;
-      } catch (err) {
-        const isLast = attempt >= maxAttempts - 1;
-
-        if (isLast) {
-          throw err instanceof RetryableDeliveryError
-            ? err
-            : new RetryableDeliveryError();
+        if (strippedDiagnostics) {
+          // accepted only once the field was left out: this server does not
+          // take it, so stop sending it (the counters are kept, not reported)
+          this.diagnosticsEnabled = false;
+          return false;
         }
 
-        await sleep(backoffMs(attempt + 1, this.retryDelay));
+        return carriesDiagnostics;
+      } catch (err) {
+        const isLast = attempt >= maxAttempts - 1;
+        const retryAfter =
+          err instanceof RetryableDeliveryError ? err.retryAfterMs : undefined;
+        const wait = Math.max(backoffMs(attempt, this.retryDelay), retryAfter ?? 0);
+        // during shutdown there is no time left for another sleep + attempt
+        const outOfBudget =
+          this.shutdownDeadline > 0 && Date.now() + wait >= this.shutdownDeadline;
+
+        if (isLast || outOfBudget) {
+          throw err instanceof RetryableDeliveryError
+            ? err
+            : new RetryableDeliveryError("retryable delivery error", undefined, "network");
+        }
+
+        await sleep(wait);
       } finally {
         clearTimeout(timeout);
       }
     }
+
+    // unreachable: the last attempt either returns or throws
+    /* v8 ignore next */
+    return false;
   }
 
   // Only caller is the defensive re-check in send() above, which is itself
@@ -749,42 +965,102 @@ export class Eventra {
   }
   /* v8 ignore stop */
 
+  private recordDiagnostic(reason: Parameters<Diagnostics["record"]>[0], n = 1) {
+    if (this.diagnosticsEnabled) this.diagnostics.record(reason, n);
+  }
+
+  // counters reach localStorage on the same debounce as the queue
+  private scheduleDiagnosticsSync() {
+    if (this.persistTimer !== undefined) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.persistNow();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
   private loadAndMergeQueue() {
     const remote = this.storage.get(QUEUE_KEY);
     if (Array.isArray(remote)) {
-      this.queue = mergeQueues(this.queue, remote as TrackEvent[]);
+      const fresh = this.withoutExpired(remote as TrackEvent[]);
+      // rewrite storage without what was dropped, so it does not come back
+      if (fresh.length !== remote.length) this.persistDirty = true;
+      this.queue = mergeQueues(this.queue, this.withoutDelivered(fresh));
     }
-    this.trimQueue();
+    this.queue = this.trimQueue();
   }
 
-  private syncQueue() {
-    if (this.persistQueue) {
-      const remote = this.storage.get(QUEUE_KEY);
-      const merged = mergeQueues(
-        Array.isArray(remote) ? (remote as TrackEvent[]) : [],
-        this.queue,
-      );
-      this.queue = this.trimQueue(merged);
-      this.storage.set(QUEUE_KEY, this.queue);
-    } else {
-      this.queue = this.trimQueue();
+  // events whose timestamp is unreadable are kept: their age cannot be judged
+  private withoutExpired(events: TrackEvent[]): TrackEvent[] {
+    const oldest = Date.now() - PERSISTED_EVENT_MAX_AGE_MS;
+    return events.filter((e) => {
+      const at = Date.parse(e?.timestamp);
+      return Number.isNaN(at) || at >= oldest;
+    });
+  }
+
+  private withoutDelivered(events: TrackEvent[]): TrackEvent[] {
+    if (!this.deliveredKeys.size) return events;
+    return events.filter((e) => !this.deliveredKeys.has(e.idempotencyKey));
+  }
+
+  private rememberDelivered(keys: Iterable<string>) {
+    for (const key of keys) this.deliveredKeys.add(key);
+    // Set iterates in insertion order, so this drops the oldest keys first
+    for (const key of this.deliveredKeys) {
+      if (this.deliveredKeys.size <= DELIVERED_KEYS_MAX) break;
+      this.deliveredKeys.delete(key);
     }
-    this.broadcastQueue();
+  }
+
+  // Burst of track() calls = one write. Reading, merging and rewriting the
+  // whole queue on every call made each call cost O(queue size).
+  private schedulePersist() {
+    if (!this.persistQueue) return;
+    this.persistDirty = true;
+    if (this.persistTimer !== undefined) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.persistNow();
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  // Immediate write of the pending state (pagehide, tab hidden, destroy).
+  // Merges what other tabs wrote first, so concurrent tabs never overwrite
+  // each other's events; delivered events are filtered out so they stay gone.
+  private persistNow() {
+    if (this.persistTimer !== undefined) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
+    // counters first: they are written even when the queue itself is not dirty
+    this.diagnostics.sync();
+    if (!this.persistQueue || !this.persistDirty) return;
+    this.persistDirty = false;
+
+    const remote = this.storage.get(QUEUE_KEY);
+    const merged = mergeQueues(
+      Array.isArray(remote)
+        ? this.withoutDelivered(this.withoutExpired(remote as TrackEvent[]))
+        : [],
+      this.queue,
+    );
+    this.queue = this.trimQueue(merged);
+    this.storage.set(QUEUE_KEY, this.queue);
   }
 
   private trimQueue(queue: TrackEvent[] = this.queue): TrackEvent[] {
     if (queue.length <= this.maxQueue) return queue;
     const dropped = queue.length - this.maxQueue;
+    this.recordDiagnostic("queue_full", dropped);
     this.options.onEventsDropped?.(dropped);
     return queue.slice(-this.maxQueue);
   }
 
-  private broadcastQueue() {
+  // Sends only what changed (a new event, or the keys just delivered) instead
+  // of structured-cloning the whole queue on every call.
+  private broadcast(message: unknown) {
     try {
-      this.channel?.postMessage({
-        type: "queue-sync",
-        events: this.queue,
-      });
+      this.channel?.postMessage(message);
     } catch {
       /* ignore */
     }
@@ -794,8 +1070,24 @@ export class Eventra {
     if (typeof BroadcastChannel !== "undefined") {
       this.channel = new BroadcastChannel(CHANNEL_NAME);
       this.channel.onmessage = (e: MessageEvent) => {
-        if (e.data?.type !== "queue-sync" || !Array.isArray(e.data.events)) return;
-        this.queue = mergeQueues(this.queue, e.data.events as TrackEvent[]);
+        const data = e.data;
+
+        if (data?.type === "delivered" && Array.isArray(data.keys)) {
+          const keys = new Set<string>(data.keys as string[]);
+          this.rememberDelivered(keys);
+          this.queue = this.queue.filter((ev) => !keys.has(ev.idempotencyKey));
+          return;
+        }
+
+        // "queue-add" is the delta a tab sends for one new event; "queue-sync"
+        // carries a whole queue and is still accepted from older SDK versions
+        if (
+          (data?.type !== "queue-add" && data?.type !== "queue-sync") ||
+          !Array.isArray(data.events)
+        ) {
+          return;
+        }
+        this.queue = mergeQueues(this.queue, this.withoutDelivered(data.events as TrackEvent[]));
         this.queue = this.trimQueue();
       };
     }
@@ -813,16 +1105,20 @@ export class Eventra {
     this.timer = setInterval(() => {
       void this.flush();
     }, this.flushInterval);
+    // a library timer must not keep a Node process alive on its own
+    (this.timer as { unref?: () => void }).unref?.();
   }
 
   private setupBrowserExit() {
     const handler = () => {
       if (document.visibilityState === "hidden") {
+        this.persistNow();
         void this.flush();
       }
     };
 
     const pageHide = () => {
+      this.persistNow();
       void this.flush();
     };
 
@@ -838,27 +1134,56 @@ export class Eventra {
   }
 
   private setupProcessExit() {
-    const proc = (
-      globalThis as {
-        process?: {
-          on: (event: string, listener: (...args: unknown[]) => void) => void;
-          once: (event: string, listener: (...args: unknown[]) => void) => void;
-          off?: (event: string, listener: (...args: unknown[]) => void) => void;
-        };
-      }
-    ).process;
+    type Proc = {
+      pid?: number;
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+      once: (event: string, listener: (...args: unknown[]) => void) => void;
+      off?: (event: string, listener: (...args: unknown[]) => void) => void;
+      listenerCount?: (event: string) => number;
+      kill?: (pid: number, signal: string) => void;
+    };
+    const proc = (globalThis as { process?: Proc }).process;
     if (!proc?.on) return;
 
-    const onSignal = () => {
-      void this.shutdown();
+    // Flush the queue and nothing else: the app owns its own shutdown. We do
+    // NOT re-raise the signal by default, because apps that use
+    // `process.once` or NestJS shutdown hooks have already removed their
+    // listener by now and a re-raise would kill them in the middle of their
+    // graceful shutdown. Note that registering any handler cancels Node's
+    // default "exit on SIGINT/SIGTERM": if the SDK is the only handler, the
+    // app has to exit itself, or set `exitOnSignal: true`, which re-raises the
+    // signal after the flush when nobody else is listening.
+    const exitOnSignal = this.options.exitOnSignal === true;
+    const onSignal = (signal: string) => () => {
+      void this.shutdown().finally(() => {
+        if (!exitOnSignal) return;
+        proc.off?.(signal, handlers[signal]);
+        const othersListening = (proc.listenerCount?.(signal) ?? 0) > 0;
+        if (!othersListening && proc.kill && proc.pid !== undefined) {
+          proc.kill(proc.pid, signal);
+        }
+      });
+    };
+    const handlers: Record<string, () => void> = {
+      SIGINT: onSignal("SIGINT"),
+      SIGTERM: onSignal("SIGTERM"),
     };
 
-    proc.once("SIGINT", onSignal);
-    proc.once("SIGTERM", onSignal);
+    // A script that tracks something and then simply ends: the (unref'd) timer
+    // no longer keeps it alive, so deliver what is queued before it exits. Runs
+    // once; the pending fetch keeps the loop alive until it settles.
+    const onBeforeExit = () => {
+      if (this.queue.length) void this.flush();
+    };
+
+    proc.once("SIGINT", handlers.SIGINT);
+    proc.once("SIGTERM", handlers.SIGTERM);
+    proc.once("beforeExit", onBeforeExit);
 
     this.exitHandlers.push(() => {
-      proc.off?.("SIGINT", onSignal);
-      proc.off?.("SIGTERM", onSignal);
+      proc.off?.("SIGINT", handlers.SIGINT);
+      proc.off?.("SIGTERM", handlers.SIGTERM);
+      proc.off?.("beforeExit", onBeforeExit);
     });
   }
 }

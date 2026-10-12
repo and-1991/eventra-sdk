@@ -30,7 +30,7 @@ describe("browser mode", () => {
     expect((sdk as unknown as { runtime: string }).runtime).toBe("browser");
   });
 
-  it("persists the queue to localStorage on track()", () => {
+  it("persists the queue to localStorage shortly after track()", async () => {
     const { fetchImpl } = createMockFetch({ responses: [200] });
     const sdk = new Eventra({
       apiKey: "k",
@@ -43,6 +43,8 @@ describe("browser mode", () => {
     sdk.track("user.signup");
     sdk.track("page.viewed");
 
+    // writes are coalesced into one short debounce, not done per track() call
+    await vi.waitFor(() => expect(env.storage.getItem("__eventra_q__")).toBeTruthy());
     const raw = env.storage.getItem("__eventra_q__");
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw as string);
@@ -61,7 +63,7 @@ describe("browser mode", () => {
           idempotencyKey: "11111111-1111-4111-8111-111111111111",
           name: "old.event",
           properties: {},
-          timestamp: "2026-01-01T00:00:00.000Z",
+          timestamp: new Date().toISOString(),
         },
       ]),
     );
@@ -105,7 +107,7 @@ describe("browser mode", () => {
           idempotencyKey: dupeKey,
           name: "remote.b",
           properties: {},
-          timestamp: "2026-01-01T00:00:00.000Z",
+          timestamp: new Date().toISOString(),
         },
       ],
     });
@@ -117,7 +119,7 @@ describe("browser mode", () => {
           idempotencyKey: dupeKey,
           name: "remote.b",
           properties: {},
-          timestamp: "2026-01-01T00:00:00.000Z",
+          timestamp: new Date().toISOString(),
         },
       ],
     });
@@ -190,7 +192,7 @@ describe("browser mode", () => {
           idempotencyKey: "11111111-1111-4111-8111-111111111111",
           name: "old.event",
           properties: {},
-          timestamp: "2026-01-01T00:00:00.000Z",
+          timestamp: new Date().toISOString(),
         },
       ]),
     );
@@ -232,7 +234,7 @@ describe("browser mode", () => {
           idempotencyKey: "22222222-2222-4222-8222-222222222222",
           name: "remote.b",
           properties: {},
-          timestamp: "2026-01-01T00:00:00.000Z",
+          timestamp: new Date().toISOString(),
         },
       ],
     });

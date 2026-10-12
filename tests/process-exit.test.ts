@@ -13,6 +13,8 @@ describe("process exit handling (Node runtime, autoFlushOnExit default)", () => 
   it("registers SIGINT/SIGTERM handlers that flush-and-shutdown, and unregisters them on destroy", async () => {
     const onceSpy = vi.spyOn(process, "once");
     const offSpy = vi.spyOn(process, "off");
+    // never let a test really signal the process, even if the behavior changes
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
     const { fetchImpl, calls } = createMockFetch({ responses: [200] });
     // autoFlushOnExit left at its default (true) so setupProcessExit() runs
@@ -35,11 +37,15 @@ describe("process exit handling (Node runtime, autoFlushOnExit default)", () => 
     sigintHandler();
     await vi.waitFor(() => expect(calls.length).toBe(1));
     expect(calls[0].body.events.map((e) => e.name)).toEqual(["bye"]);
+    // default: flush and nothing else, the app owns its own shutdown
+    await new Promise((r) => setTimeout(r, 50));
+    expect(killSpy).not.toHaveBeenCalled();
 
     sdk.destroy();
     expect(offSpy).toHaveBeenCalledWith("SIGINT", sigintHandler);
     expect(offSpy).toHaveBeenCalledWith("SIGTERM", expect.any(Function));
 
+    killSpy.mockRestore();
     onceSpy.mockRestore();
     offSpy.mockRestore();
   });

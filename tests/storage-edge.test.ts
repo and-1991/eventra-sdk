@@ -152,7 +152,7 @@ describe("cross-tab queue sync via storage events", () => {
           idempotencyKey: "sibling-key",
           name: "sibling.event",
           properties: {},
-          timestamp: "2026-01-01T00:00:00.000Z",
+          timestamp: new Date().toISOString(),
         },
       ]),
     );

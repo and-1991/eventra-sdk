@@ -8,8 +8,8 @@
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm version" src="https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://github.com/and-1991/eventra-sdk/actions/workflows/test.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/and-1991/eventra-sdk/test.yml?branch=main&label=tests&style=flat-square&logo=vitest&logoColor=white"></a>
-  <img alt="tests passing" src="https://img.shields.io/badge/tests-86%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
-  <img alt="test suites" src="https://img.shields.io/badge/suites-12-brightgreen?style=flat-square">
+  <img alt="tests passing" src="https://img.shields.io/badge/tests-162%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
+  <img alt="test suites" src="https://img.shields.io/badge/suites-17-brightgreen?style=flat-square">
   <img alt="coverage" src="https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="node" src="https://img.shields.io/node/v/@eventra_dev/eventra-sdk?style=flat-square&color=darkgreen&logo=node.js&logoColor=white">
   <a href="https://www.typescriptlang.org/"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-ready-blue?style=flat-square&logo=typescript&logoColor=white"></a>
@@ -228,6 +228,10 @@ const tracker = new Eventra({
 });
 ```
 
+Writes to `localStorage` are coalesced: a burst of `track()` calls costs one write about 50 ms later, not one write per call, and the queue is written immediately on `pagehide`, when the tab becomes hidden, and on `shutdown()`/`destroy()`. Closing or navigating away never loses events; only a hard crash of the tab in that ~50 ms window can.
+
+Events kept in `localStorage` have a maximum age of 14 days: when the queue is loaded again (page load, another tab writing it), events older than that are dropped. The server only remembers idempotency keys for 30 days, so an event that was already delivered while the page was closing (whose response is never seen) must not be re-sent by a visitor who comes back months later and be counted twice.
+
 With `persistQueue: false`, nothing is written to `localStorage`; the queue lives in memory only and is lost if the page closes before delivery (live cross-tab dedup via `BroadcastChannel` still works, since that's never written to disk).
 
 ---
@@ -322,6 +326,9 @@ const tracker = new Eventra({
 | onEventsDropped | Callback when queue is full |
 | onDeliveryFailed | Callback on permanent ingest errors (4xx except 429) |
 | multiTabMode | `"independent"` (default) or `"leader"` (browser only) |
+| exitOnSignal | Node only. On `SIGINT`/`SIGTERM` the SDK flushes and does nothing else (default `false`); `true` re-raises the signal after the flush when no other listener exists. See [Shutdown](#shutdown) |
+| shutdownTimeoutMs | Total time `shutdown()` may spend flushing (default: 10000). It gives up after this, so a dead or rate-limited server cannot hold a `SIGTERM` shutdown past your grace period |
+| diagnostics | Report delivery problems (counts only) with the next successful batch, default `true`; `false` sends nothing extra. See [Delivery diagnostics](#delivery-diagnostics) |
 | persistQueue | Persist the queue to `localStorage` in the browser (browser only, default: `true`) — `false` keeps it in-memory only, avoiding writing `userId`/`properties` to disk |
 
 ---
@@ -342,6 +349,10 @@ Graceful shutdown — flush first, then cleanup:
 await tracker.shutdown();
 ```
 
+On `SIGINT`/`SIGTERM` the SDK flushes its queue and does nothing else, so it never interrupts your own graceful shutdown (an app that uses `process.once` or framework shutdown hooks has already removed its listener by the time the SDK finishes, and killing the process then would cut that shutdown off). Be aware that registering any signal handler cancels Node's default "exit on SIGINT/SIGTERM": **if the SDK is the only signal handler in your process, your app must exit itself** (for example `process.exit()` after your cleanup), or you can set `exitOnSignal: true`, which makes the SDK re-raise the signal after the flush when no other listener exists.
+
+`shutdown()` has a total time budget (`shutdownTimeoutMs`, default 10 s). While it runs, retries and `Retry-After` waits that do not fit in what is left are skipped and requests are cut at the deadline, so a server that is down or rate limiting cannot hold the process past a typical termination grace period; events that could not be sent stay in the persisted queue (browser) or are lost with the process (Node). The flush timer never keeps a Node process alive on its own, and events still queued when a script ends are sent on `beforeExit`. `shutdown()` waits for a flush that is already running before sending what is left.
+
 For Node / serverless, prefer explicit shutdown over relying on process signals:
 
 ```ts
@@ -353,13 +364,58 @@ await tracker.shutdown();
 
 ---
 
+## Delivery diagnostics
+
+The SDK counts what it could not deliver and tells Eventra with the next batch that gets through, so the dashboard can show how many events never arrived and why. It is on by default and switched off with `diagnostics: false`.
+
+What is counted (numbers only, never event names, user ids or properties):
+
+| group | reason | meaning |
+|-------|--------|---------|
+| dropped (events) | `queue_full` | the queue overflowed |
+| | `invalid_event` | empty name, or properties over the depth/size limits |
+| | `too_large` | a single event above `maxPayloadBytes` |
+| | `rejected` | the server answered 4xx (not 429) |
+| failed (send attempts) | `network` | blocked, offline, DNS or timeout, after the retries |
+| | `server_error` | 5xx after the retries |
+| | `rate_limited` | 429 after the retries |
+| (detail) | `circuit_open` | the circuit breaker opened; listed by reason only, not added to `failedTotal` |
+
+A failed batch is not lost: its events stay queued. `failedTotal` counts failed send attempts (a batch that could not be delivered after all its retries counts once, whatever the number of events or HTTP requests in it), `droppedTotal` counts events that are gone. The two are different units and are not added together.
+
+How it is sent: as optional metadata in the batch envelope, never as an event, so it is not billed and an event count never includes it.
+
+```json
+{
+  "sentAt": "2026-03-12T10:00:00Z",
+  "sdk": { "name": "@eventra_dev/eventra-sdk", "version": "<sdk-version>", "runtime": "browser" },
+  "diagnostics": {
+    "reportId": "0b6f3c52-3a2a-4a3e-8f0e-1b2f6f2d9b11",
+    "since": "2026-03-12T09:41:00.000Z",
+    "droppedTotal": 3,
+    "failedTotal": 2,
+    "byReason": { "queue_full": 3, "network": 2 },
+    "queued": 12,
+    "sdkVersion": "<sdk-version>"
+  },
+  "events": []
+}
+```
+
+- A report is built from the counters since the last acknowledged one, and is removed only after the server answers 2xx for the batch that carried it. If that batch fails, the same report (same `reportId`) is sent again, and the server counts a `reportId` once, so a retry never double counts.
+- In the browser the counters are kept with the queue (`localStorage`, same debounce) and survive a reload; with `persistQueue: false` they stay in memory.
+- A server that does not know the field and rejects the batch with 400/422 gets the same batch again without it (no event is lost), and the SDK stops sending the field.
+- **Limit:** a client that is fully blocked (an ad blocker, a firewall) cannot report anything: the report travels with a successful batch, so it only arrives once a later batch gets through. To reduce blocking, send events through a first-party endpoint on your own domain (a reverse proxy that forwards `/eventra/ingest` to Eventra's ingest URL, with the `x-api-key` header passed through) and set `endpoint` to it.
+
+---
+
 ## Reliability Features
 
 Eventra SDK includes:
 
 - Idempotency (UUID v4 per event, stable across retries)
-- Retry with exponential backoff + jitter (capped)
-- Circuit breaker with half-open recovery
+- Retry with exponential backoff + jitter (capped); `Retry-After` on 429/5xx is honoured (up to 30 s), also for the next scheduled flush after the last attempt
+- Circuit breaker with half-open recovery: one probe request, cooldown doubles after each failed probe (5 s up to 60 s)
 - Queue-based delivery (all runtimes)
 - Safe dequeue (events removed only after successful ingest)
 - Queue persistence (browser) with merge + cross-tab sync — opt out via `persistQueue: false` if `localStorage` isn't acceptable for your data
@@ -370,6 +426,7 @@ Eventra SDK includes:
 - Payload byte limits per batch
 - Permanent error handling via `onDeliveryFailed` (401, 422, etc.)
 - Automatic requeue on network errors and 429 / 5xx
+- Delivery diagnostics: counts of dropped / failed events sent with the next successful batch (opt out with `diagnostics: false`)
 
 ---
 
@@ -377,14 +434,15 @@ Eventra SDK includes:
 
 **100% statement/branch/function/line coverage** (v8 provider, `pnpm test:coverage`).
 
-86 vitest tests across 13 suites cover the entire delivery pipeline:
+162 vitest tests across 17 files (plus 7 Playwright tests in a real browser) cover the entire delivery pipeline:
 
 - `track()` validation — name length, userId truncation, properties depth/size, idempotency keys
 - Batching — auto-flush at `maxBatchSize`, periodic flush via timer, queue overflow drop
 - Retry & backoff — 429, 5xx, network errors, no-retry on 4xx, fetch timeout/abort
 - Circuit breaker — opens after 5 consecutive failures, cools down, resets on success
 - Payload guards — multi-batch splitting, oversize event dropped via `onDeliveryFailed(413)`
-- Shutdown & destroy — flush ordering, timer teardown, idempotent shutdown
+- Shutdown & destroy - flush ordering, timer teardown, idempotent shutdown, the `shutdownTimeoutMs` budget, signal handling (flush only by default, `exitOnSignal`)
+- Persisted queue - coalesced writes, 14-day maximum age, delivered-key filtering, cross-tab merge
 - Runtime detection — Node, Edge (`EdgeRuntime`), Serverless (AWS Lambda), unknown fallback, Node process exit handling
 - Browser mode — persistence, leader election (including multi-tab lease races), BroadcastChannel sync, `fetch` keepalive, `pagehide`
 - Storage edge cases — corrupted/blocked localStorage, quota exceeded, queue trimming
@@ -435,7 +493,7 @@ Limits enforced by the SDK at `track()` time:
 | Property nesting depth | ≤ 8 |
 | Batch payload | ≤ `maxPayloadBytes` (default 60,000) |
 | Fetch timeout | 5,000 ms |
-| Circuit breaker | opens after 5 consecutive failures, cools down 5,000 ms |
+| Circuit breaker | opens after 5 consecutive failures, cools down 5,000 ms, doubling after each failed probe up to 60,000 ms |
 
 ---
 
