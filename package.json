@@ -1,6 +1,6 @@
 {
   "name": "@eventra_dev/eventra-sdk",
-  "version": "2.0.6",
+  "version": "2.0.7",
   "description": "Production-grade analytics SDK for feature usage and product behavior — batching, retries, circuit breaker, runtime-aware (browser, Node, Edge, serverless).",
   "private": false,
   "publishConfig": {
@@ -43,7 +43,7 @@
   },
   "license": "MIT",
   "author": {
-    "name": "and-1991",
+    "name": "Yuriy Korolik",
     "url": "https://github.com/and-1991"
   },
   "engines": {

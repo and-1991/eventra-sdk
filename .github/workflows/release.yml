@@ -24,6 +24,10 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org/
 
+      # Trusted publishing (OIDC, no stored token) needs npm 11.5.1 or newer; Node 20 ships an older npm.
+      - name: Update npm
+        run: npm install -g npm@11.5.1
+
       - run: pnpm install --no-frozen-lockfile
 
       - name: Run tests
@@ -41,31 +45,32 @@ jobs:
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       # A push that does not bump the version (docs, CI) must neither fail on "cannot publish over the
-      # previously published version" nor create a second tag or release. The token is only needed so
-      # that setup-node's .npmrc does not break `npm view`.
+      # previously published version" nor create a second tag or release. The registry answers a public
+      # read without a token: 200 means the version exists, 404 means it does not.
       - name: Check whether this version is already on npm
         id: npm
         run: |
-          published=$(npm view "$NAME@$VERSION" version 2>/dev/null || true)
-          if [ "$published" = "$VERSION" ]; then
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${NAME/\//%2F}/$VERSION")
+          if [ "$status" = "200" ]; then
             echo "published=true" >> "$GITHUB_OUTPUT"
             echo "$NAME@$VERSION is already on npm, skipping publish and release"
-          else
+          elif [ "$status" = "404" ]; then
             echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm registry answered $status for $NAME@$VERSION, not publishing" >&2
+            exit 1
           fi
         env:
           NAME: ${{ steps.pkg.outputs.name }}
           VERSION: ${{ steps.pkg.outputs.version }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # --provenance signs the package with this workflow's identity (id-token: write above), so npm shows
-      # which repository, commit and workflow run built it. It works because this workflow runs in the
-      # repository named in package.json.
+      # No npm token is stored anywhere: npm exchanges this workflow's identity (id-token: write above)
+      # for a short-lived publish credential, which only works because the package's "Trusted Publisher"
+      # setting on npmjs.com names this repository and this file (release.yml). The same identity signs
+      # the provenance that npm shows on the package page.
       - name: Publish to npm
         if: steps.npm.outputs.published != 'true'
         run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Tag and create a GitHub release
         if: steps.npm.outputs.published != 'true'
