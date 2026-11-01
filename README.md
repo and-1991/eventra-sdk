@@ -93,7 +93,7 @@ Eventra SDK adapts automatically:
 | ----------- | -------------------------------------- |
 | Browser     | batching + persistence + retry         |
 | Node.js     | batching + retry                       |
-| Serverless  | immediate flush + retry                |
+| Serverless (AWS Lambda only) | immediate flush + retry |
 | Edge        | batching + retry                       |
 | Anything else (e.g. Cloudflare Workers) | not distinctly detected — falls back to the same batching + retry path as Node.js |
 
@@ -188,8 +188,8 @@ tracker.track("error.occurred", {
 - NestJS services 
 - Express APIs 
 - Edge runtimes 
-- Serverless (AWS / Vercel)
-- Bun / Deno
+- Serverless (AWS Lambda is auto-detected and flushes immediately; on Vercel and other platforms call `await tracker.flush()` yourself, as in the example below)
+- Bun / Deno (not tested)
 
 ---
 
@@ -269,7 +269,7 @@ export default async function handler(req, res) {
 }
 ```
 
-- immediate flush
+- AWS Lambda is detected automatically and flushes right away; on Vercel and other platforms the SDK batches on a timer, so always `await tracker.flush()` before the response ends
 - retry
 - optimized for short-lived environments
 
@@ -287,7 +287,7 @@ const tracker = new Eventra({
   retryBaseDelayMs: 300,
   maxPayloadBytes: 60000,
   onEventsDropped: (count) => {
-    console.warn(`Dropped ${count} event(s) — queue full`);
+    console.warn(`Dropped ${count} event(s)`);
   },
   onDeliveryFailed: ({ status, events }) => {
     console.error(`Ingest rejected batch (${status})`, events.length);
@@ -323,7 +323,7 @@ const tracker = new Eventra({
 | fetchImpl | Custom `fetch` (Node without native fetch, tests) |
 | autoFlushOnExit | Flush on process exit (Node / serverless, default: `true`) |
 | disableTimer | Disable periodic flush timer |
-| onEventsDropped | Callback when queue is full |
+| onEventsDropped | Called with a count when events are dropped (queue full, an invalid event, or a single event above `maxPayloadBytes`) |
 | onDeliveryFailed | Callback on permanent ingest errors (4xx except 429) |
 | multiTabMode | `"independent"` (default) or `"leader"` (browser only) |
 | exitOnSignal | Node only. On `SIGINT`/`SIGTERM` the SDK flushes and does nothing else (default `false`); `true` re-raises the signal after the flush when no other listener exists. See [Shutdown](#shutdown) |
@@ -439,7 +439,7 @@ Eventra SDK includes:
 - `track()` validation — name length, userId truncation, properties depth/size, idempotency keys
 - Batching — auto-flush at `maxBatchSize`, periodic flush via timer, queue overflow drop
 - Retry & backoff — 429, 5xx, network errors, no-retry on 4xx, fetch timeout/abort
-- Circuit breaker — opens after 5 consecutive failures, cools down, resets on success
+- Circuit breaker - opens after 5 consecutive failed batches (each one after its retries), cools down, resets on success
 - Payload guards — multi-batch splitting, oversize event dropped via `onDeliveryFailed(413)`
 - Shutdown & destroy - flush ordering, timer teardown, idempotent shutdown, the `shutdownTimeoutMs` budget, signal handling (flush only by default, `exitOnSignal`)
 - Persisted queue - coalesced writes, 14-day maximum age, delivered-key filtering, cross-tab merge
@@ -455,7 +455,7 @@ pnpm --filter @eventra_dev/eventra-sdk test
 pnpm --filter @eventra_dev/eventra-sdk test:coverage
 ```
 
-> **Node version note:** the SDK itself supports Node 18+ (see `engines`), but `vitest@4` depends on `node:util`'s `styleText`, which requires Node **≥ 20.12** — running the test suite on an older Node 20.x patch (or Node 18) fails to start. CI runs the matrix on Node 20 and 22; locally, use the version pinned in the repo's `.nvmrc`.
+> **Node version note:** the SDK itself supports Node 18+ (see `engines`), but `vitest@4` depends on `node:util`'s `styleText`, which requires Node **≥ 20.12** - running the test suite on an older Node 20.x patch (or Node 18) fails to start. CI runs the matrix on Node 20 and 22; locally, use Node 20.19 or newer (20.x or 22.x).
 
 ---
 
@@ -493,7 +493,7 @@ Limits enforced by the SDK at `track()` time:
 | Property nesting depth | ≤ 8 |
 | Batch payload | ≤ `maxPayloadBytes` (default 60,000) |
 | Fetch timeout | 5,000 ms |
-| Circuit breaker | opens after 5 consecutive failures, cools down 5,000 ms, doubling after each failed probe up to 60,000 ms |
+| Circuit breaker | opens after 5 consecutive failed batches (each one after its retries), cools down 5,000 ms, doubling after each failed probe up to 60,000 ms |
 
 ---
 
