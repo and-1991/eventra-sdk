@@ -417,6 +417,25 @@ class Leader {
 }
 
 // ================= SDK =================
+// The key is sent with every batch, so a plain http endpoint exposes it on the
+// network. Not an error (an internal http collector is a legitimate setup);
+// loopback is exempt.
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function warnIfInsecureEndpoint(endpoint: string): void {
+  if (typeof console === "undefined") return;
+  try {
+    const url = new URL(endpoint);
+    if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) {
+      console.warn(
+        "Eventra: endpoint uses plain http, the API key is sent unencrypted - use https",
+      );
+    }
+  } catch {
+    /* a relative or malformed endpoint is left for fetch to reject */
+  }
+}
+
 export class Eventra {
   private apiKey: string;
   private endpoint: string;
@@ -482,6 +501,7 @@ export class Eventra {
     this.apiKey = options.apiKey;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.runtime = detectRuntime();
+    warnIfInsecureEndpoint(this.endpoint);
 
     this.fetch = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
     if (!this.fetch) {
@@ -890,6 +910,10 @@ export class Eventra {
           body: payload,
           signal: controller.signal,
           keepalive: useKeepalive,
+          // never follow a redirect: x-api-key is a custom header, so fetch
+          // would forward it to wherever a compromised or misconfigured
+          // endpoint points
+          redirect: "error",
         });
 
         if (res.status === 429 || res.status >= 500) {

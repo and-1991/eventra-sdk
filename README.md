@@ -295,7 +295,7 @@ const tracker = new Eventra({
 });
 ```
 
-`endpoint` is optional — omit it to use the production ingest URL.
+`endpoint` is optional - omit it to use the production ingest URL. Use `https`: a plain `http` endpoint on a remote host logs a warning, since the API key would travel unencrypted (`localhost` is exempt). The SDK never follows a redirect when sending, so the key cannot be forwarded to another host.
 
 For self-hosted or local development:
 
@@ -312,7 +312,7 @@ const tracker = new Eventra({
 
 | option | description |
 | ------------- | --------------------------- |
-| apiKey | Project API key (required) |
+| apiKey | Project API key (required). Create it with `SDK` access in the dashboard (a key made for the CLI is refused with 403) |
 | endpoint | Ingest batch URL |
 | flushInterval | Flush interval (ms) |
 | maxBatchSize | Events per batch |
