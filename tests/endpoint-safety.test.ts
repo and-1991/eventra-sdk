@@ -35,6 +35,48 @@ describe("endpoint safety", () => {
     expect(init.redirect).toBe("error");
   });
 
+  it("warns once when the endpoint answers with a redirect, and keeps the events queued", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const redirected = vi.fn(async () => {
+      throw new TypeError("fetch failed", { cause: new Error("unexpected redirect") });
+    });
+    const onDeliveryFailed = vi.fn();
+    const sdk = new Eventra({
+      apiKey: "k",
+      endpoint: "https://api.example.com/v1/ingest/batch",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      maxRetries: 0,
+      fetchImpl: redirected as unknown as typeof fetch,
+      onDeliveryFailed,
+    });
+    active.push(sdk);
+
+    sdk.track("a");
+    await sdk.flush();
+    sdk.track("b");
+    await sdk.flush();
+
+    const messages = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("redirect"));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("check the endpoint URL");
+    expect(onDeliveryFailed).not.toHaveBeenCalled();
+    expect(redirected).toHaveBeenCalled();
+  });
+
+  it("does not call another network failure a redirect", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failing = vi.fn(async () => {
+      throw new TypeError("Failed to fetch", { cause: new Error("connect ECONNREFUSED") });
+    });
+    const sdk = make("https://api.example.com/v1/ingest/batch", failing as unknown as typeof fetch);
+
+    sdk.track("a");
+    await sdk.flush();
+
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes("redirect"))).toHaveLength(0);
+  });
+
   it("warns once about a plain http endpoint on a remote host", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { fetchImpl } = createMockFetch({ responses: [200] });

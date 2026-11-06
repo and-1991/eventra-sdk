@@ -436,6 +436,18 @@ function warnIfInsecureEndpoint(endpoint: string): void {
   }
 }
 
+// fetch with `redirect: "error"` rejects with a TypeError whose cause says so
+// (undici: "unexpected redirect"). A browser only reports "Failed to fetch", so
+// there a redirect cannot be told from any other network failure.
+function isRedirectError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 3 && current instanceof Error; depth++) {
+    if (/redirect/i.test(current.message)) return true;
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export class Eventra {
   private apiKey: string;
   private endpoint: string;
@@ -466,6 +478,7 @@ export class Eventra {
   private onStorageQueue?: (e: StorageEvent) => void;
 
   private failureCount = 0;
+  private warnedRedirect = false;
   private circuitOpenUntil = 0;
   private circuitHalfOpen = false;
   // consecutive times the circuit opened without a success in between; drives
@@ -953,6 +966,12 @@ export class Eventra {
 
         return carriesDiagnostics;
       } catch (err) {
+        if (!this.warnedRedirect && isRedirectError(err) && typeof console !== "undefined") {
+          this.warnedRedirect = true;
+          console.warn(
+            "Eventra: the endpoint answered with a redirect. It is not followed, so the API key is not forwarded, and events stay queued - check the endpoint URL (for example http instead of https)",
+          );
+        }
         const isLast = attempt >= maxAttempts - 1;
         const retryAfter =
           err instanceof RetryableDeliveryError ? err.retryAfterMs : undefined;

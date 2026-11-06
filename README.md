@@ -295,7 +295,7 @@ const tracker = new Eventra({
 });
 ```
 
-`endpoint` is optional - omit it to use the production ingest URL. Use `https`: a plain `http` endpoint on a remote host logs a warning, since the API key would travel unencrypted (`localhost` is exempt). The SDK never follows a redirect when sending, so the key cannot be forwarded to another host.
+`endpoint` is optional - omit it to use the production ingest URL. Use `https`: a plain `http` endpoint on a remote host logs a warning, since the API key would travel unencrypted (`localhost` is exempt). The SDK never follows a redirect when sending, so the key cannot be forwarded to another host. A redirect is not a server rejection, so `onDeliveryFailed` is not called for it: the events stay queued and are retried, and in Node (and other runtimes whose `fetch` names the redirect) the SDK logs one warning telling you to check the endpoint URL. A browser only reports a failed request, so there a redirect looks like any other network failure.
 
 For self-hosted or local development:
 
