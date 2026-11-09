@@ -1,5 +1,6 @@
 export interface TrackOptions {
-  userId?: string;
+  /** A string; a number is written out as text. Cut to 120 characters. */
+  userId?: string | number;
   properties?: Record<string, unknown>;
 }
 

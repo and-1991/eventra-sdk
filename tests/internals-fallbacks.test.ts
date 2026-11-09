@@ -68,12 +68,20 @@ describe("uuidV4 fallbacks", () => {
     }
   });
 
-  it("throws when no crypto API is available at all (track() cannot generate an idempotencyKey)", () => {
+  it("still produces a valid unique idempotencyKey when no crypto API exists (Node 18) and never throws", async () => {
     const restore = overrideCrypto(undefined);
 
     try {
-      const { sdk } = makeSdk();
-      expect(() => sdk.track("a")).toThrow(/crypto API unavailable/);
+      const { sdk, calls } = makeSdk();
+      expect(() => sdk.track("a")).not.toThrow();
+      sdk.track("b");
+      await sdk.flush();
+      const keys = calls[0].body.events.map((e) => e.idempotencyKey as string);
+      expect(keys).toHaveLength(2);
+      for (const key of keys) {
+        expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      }
+      expect(new Set(keys).size).toBe(2);
     } finally {
       restore();
     }

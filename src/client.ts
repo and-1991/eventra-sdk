@@ -52,6 +52,8 @@ const PERSIST_DEBOUNCE_MS = 50;
 // accepted a second time.
 const PERSISTED_EVENT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+// the most a keepalive request may carry: Chrome and Firefox refuse more than 64 KiB
+const KEEPALIVE_MAX_BYTES = 60_000;
 // Keys of events already delivered, remembered so a stale copy in
 // localStorage or from another tab cannot put them back in the queue.
 const DELIVERED_KEYS_MAX = 10_000;
@@ -90,16 +92,117 @@ function uuidV4(): string {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
-  throw new Error("Eventra: crypto API unavailable — cannot generate idempotencyKey");
+  // No Web Crypto (Node 18 without the global, odd runtimes): `track()` must
+  // never throw, so fall back to a random v4-shaped id. The key only has to be
+  // unique per event for server-side dedup, it is not a secret.
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  let t = Date.now();
+  for (let i = 0; i < 6; i++) {
+    bytes[i] ^= t & 0xff;
+    t = Math.floor(t / 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const MAX_TIMER_MS = 2_147_483_647;
+// delivery attempts per batch: a billion would be a way to never give up, not a setting
+const MAX_RETRIES = 20;
+
+function isUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function warnOption(name: string, value: unknown, fallback: unknown): void {
+  if (typeof console !== "undefined") {
+    console.warn(`Eventra: option "${name}" is invalid (${String(value)}), using ${String(fallback)}`);
+  }
+}
+
+/**
+ * A numeric option that must be a finite number of at least `min` (and at most `max`). Anything else
+ * (NaN, a string, a negative number, Infinity) used to be accepted and silently stop delivery; it now
+ * falls back to the default with one warning.
+ */
+function numberOption(name: string, value: unknown, fallback: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (value === undefined) return fallback;
+  if (typeof value === "number" && Number.isFinite(value) && value >= min && value <= max) return value;
+  warnOption(name, value, fallback);
+  return fallback;
+}
+
+/**
+ * Runs a callback of the integrator. It must never break the SDK: a throw, or a rejected promise from an
+ * async callback, is swallowed (the SDK keeps working and the batch is not retried because of it).
+ */
+function callSafely<A extends unknown[]>(callback: ((...args: A) => unknown) | undefined, ...args: A): void {
+  if (!callback) return;
+  try {
+    const result = callback(...args);
+    if (result && typeof (result as Promise<unknown>).catch === "function") {
+      (result as Promise<unknown>).catch(() => undefined);
+    }
+  } catch {
+    /* an integrator's callback must not break delivery */
+  }
+}
+
+/**
+ * Rejects when `signal` aborts (it is fresh, not aborted yet) even if `fetch` itself ignores it: a custom `fetchImpl` that does not honour the
+ * signal would otherwise hold the SDK forever, since the request deadline works only through the signal.
+ */
+function raceAbort<T>(request: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(Object.assign(new Error("Eventra: request timed out"), { name: "AbortError" }));
+    signal.addEventListener("abort", onAbort, { once: true });
+    request.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Only the status and headers are used: close the body so the connection is not held by a large unread reply. */
+function discardBody(res: Response): void {
+  try {
+    const closing = res.body?.cancel?.();
+    if (closing && typeof closing.catch === "function") closing.catch(() => undefined);
+  } catch {
+    /* a reply without a readable body is fine */
+  }
 }
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function truncate(value: string | undefined, max: number): string | undefined {
-  if (value === undefined) return undefined;
-  return value.length > max ? value.slice(0, max) : value;
+// A cut must not leave half of a character outside the basic plane (an emoji, say): the server drops a lone
+// surrogate, so the name or id it stores would differ from what was sent.
+function cut(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const end = value.charCodeAt(max - 1) >= 0xd800 && value.charCodeAt(max - 1) <= 0xdbff ? max - 1 : max;
+  return value.slice(0, end);
+}
+
+/** A user id is a string; a number is written out, anything else (null, an object) means no user id. */
+function normalizeUserId(value: unknown, max: number): string | undefined {
+  if (typeof value === "bigint" || (typeof value === "number" && Number.isFinite(value))) return cut(String(value), max);
+  if (typeof value !== "string") return undefined;
+  return cut(value, max);
 }
 
 /**
@@ -112,7 +215,9 @@ function normalizeEventName(name: string): string | null {
   if (typeof name !== "string") return null;
   const trimmed = name.trim();
   if (!trimmed) return null;
-  return trimmed.length > MAX_EVENT_NAME ? trimmed.slice(0, MAX_EVENT_NAME) : trimmed;
+  // trimmed again after the cut: the CLI catalog holds the name the same way, so a name cut in the middle of a
+  // space is the same event in both
+  return cut(trimmed, MAX_EVENT_NAME).trimEnd();
 }
 
 // `attempt` is the 0-based index of the attempt that just failed, so the first
@@ -138,56 +243,104 @@ function utf8ByteLength(value: string): number {
   return value.length;
 }
 
+function isStoredEvent(e: unknown): e is TrackEvent {
+  if (e === null || typeof e !== "object") return false;
+  const ev = e as Partial<TrackEvent>;
+  return (
+    typeof ev.idempotencyKey === "string" &&
+    ev.idempotencyKey.length > 0 &&
+    ev.idempotencyKey.length <= 100 &&
+    typeof ev.name === "string" &&
+    ev.name.length > 0 &&
+    ev.name.length <= MAX_EVENT_NAME &&
+    typeof ev.timestamp === "string" &&
+    (ev.userId === undefined || (typeof ev.userId === "string" && ev.userId.length <= MAX_USER_ID)) &&
+    (ev.properties === undefined || (ev.properties !== null && typeof ev.properties === "object" && !Array.isArray(ev.properties)))
+  );
+}
+
 function mergeQueues(...queues: TrackEvent[][]): TrackEvent[] {
   const seen = new Set<string>();
   const out: TrackEvent[] = [];
 
   for (const q of queues) {
     for (const e of q) {
+      // storage and other tabs are untrusted input: skip anything that is not
+      // an event instead of throwing out of the constructor
+      if (!isStoredEvent(e)) continue;
       if (seen.has(e.idempotencyKey)) continue;
       seen.add(e.idempotencyKey);
-      out.push(e);
+      // an event whose time cannot be read is kept (its age cannot be judged), but it is not sent as it is: the
+      // server would refuse it, and a 4xx drops the whole batch it is in
+      out.push(Number.isNaN(Date.parse(e.timestamp)) ? { ...e, timestamp: new Date().toISOString() } : e);
     }
   }
 
   return out;
 }
 
+// The depth walk visits shared references again for each path, so a fan-out of shared objects would take
+// time that grows with fanout^depth; past this many visits the properties are too large anyway.
+const MAX_PROPERTIES_NODES = 50_000;
+
 function validateProperties(
-  properties: Record<string, unknown>,
+  properties: unknown,
 ): Record<string, unknown> {
-  // Nothing to walk or measure for an empty object (the common case).
+  // Properties are an object of values: a number, a string, a list or null is not (it used to pass through as is).
+  if (
+    properties === null ||
+    typeof properties !== "object" ||
+    Array.isArray(properties) ||
+    // a Date, a Map, a Set, a RegExp: objects, but not a bag of named values
+    Object.prototype.toString.call(properties) !== "[object Object]"
+  ) {
+    throw new Error("Eventra: properties must be an object");
+  }
+  // Nothing to walk or measure for an empty object (the common case), but it is still copied: the caller
+  // keeps its own object and may fill it in later.
   let hasKeys = false;
-  for (const _ in properties) {
+  for (const _ in properties as object) {
     hasKeys = true;
     break;
   }
-  if (!hasKeys) return properties;
+  if (!hasKeys) return {};
 
+  let visited = 0;
   const depth = (obj: unknown, level: number): void => {
     if (level > MAX_PROPERTIES_DEPTH) {
       throw new Error(`Eventra: properties exceed max depth (${MAX_PROPERTIES_DEPTH})`);
+    }
+    if (++visited > MAX_PROPERTIES_NODES) {
+      throw new Error("Eventra: properties are too large to check");
     }
     if (obj === null || typeof obj !== "object") return;
     if (Array.isArray(obj)) {
       for (const item of obj) depth(item, level + 1);
       return;
     }
-    for (const value of Object.values(obj as Record<string, unknown>)) {
-      depth(value, level + 1);
+    // not Object.values(): a million keys would be copied into a list before the budget could stop the walk
+    for (const key in obj as Record<string, unknown>) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) depth((obj as Record<string, unknown>)[key], level + 1);
     }
   };
 
   depth(properties, 0);
 
   const json = JSON.stringify(properties);
-  if (utf8ByteLength(json) > MAX_PROPERTIES_JSON_BYTES) {
+  if (json === undefined || utf8ByteLength(json) > MAX_PROPERTIES_JSON_BYTES) {
     throw new Error(
       `Eventra: properties exceed max size (${MAX_PROPERTIES_JSON_BYTES} bytes)`,
     );
   }
 
-  return properties;
+  // Snapshot: the caller keeps its own object and may change it (even make it
+  // circular) before the event is sent. What was validated is what is sent.
+  const copy: unknown = JSON.parse(json);
+  // an object with a toJSON() can serialize to something that is not an object
+  if (copy === null || typeof copy !== "object" || Array.isArray(copy)) {
+    throw new Error("Eventra: properties must be an object");
+  }
+  return copy as Record<string, unknown>;
 }
 
 // Seconds ("120") or an HTTP date; anything else (or a past date) is ignored.
@@ -278,6 +431,15 @@ class Storage {
 }
 
 // ================= LEADER =================
+/** Whether `localStorage` can be used at all: in a sandboxed iframe even looking at it throws a SecurityError. */
+function storageAvailable(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage !== null;
+  } catch {
+    return false;
+  }
+}
+
 class Leader {
   private tabId = uuidV4();
   private isLeader = false;
@@ -286,7 +448,7 @@ class Leader {
   private onStorage?: (e: StorageEvent) => void;
 
   constructor(private onLeadershipChange?: (isLeader: boolean) => void) {
-    if (typeof localStorage === "undefined") {
+    if (!storageAvailable()) {
       this.isLeader = true;
       return;
     }
@@ -400,7 +562,7 @@ class Leader {
     if (this.onStorage && typeof window !== "undefined") {
       window.removeEventListener("storage", this.onStorage);
     }
-    if (this.isLeader && typeof localStorage !== "undefined") {
+    if (this.isLeader && storageAvailable()) {
       try {
         const raw = localStorage.getItem(LEADER_KEY);
         if (raw) {
@@ -494,6 +656,10 @@ export class Eventra {
   private nextFlushAt = 0;
   // 0 = no limit; set by shutdown() so retries and sleeps cannot overrun it
   private shutdownDeadline = 0;
+  private shutdownBudget = DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  private shutdownPromise?: Promise<void>;
+  // the page is being left (`pagehide`)
+  private leaving = false;
 
   private sdkInfo: SdkInfo;
   private options: TrackerOptions;
@@ -501,87 +667,152 @@ export class Eventra {
   private exitHandlers: Array<() => void> = [];
 
   constructor(options: TrackerOptions) {
-    if (!options.apiKey) throw new Error("Eventra: apiKey required");
+    if (!options || typeof options !== "object" || typeof options.apiKey !== "string" || !options.apiKey) {
+      throw new Error("Eventra: apiKey required - new Eventra({ apiKey: \"...\" })");
+    }
+    // the key travels in an HTTP header: a character outside Latin-1 makes every request fail, and nothing says why
+    if (/[^\u0020-\u00ff]/.test(options.apiKey)) {
+      throw new Error("Eventra: apiKey has characters that cannot be sent in a header - copy it again from the dashboard");
+    }
+    if (options.fetchImpl !== undefined && typeof options.fetchImpl !== "function") {
+      throw new Error("Eventra: fetchImpl must be a function");
+    }
 
     activeInstances++;
     if (activeInstances > 1 && typeof console !== "undefined") {
       console.warn(
-        "Eventra: multiple SDK instances detected — duplicate timers and sends are possible",
+        "Eventra: multiple SDK instances detected - duplicate timers and sends are possible",
       );
     }
 
-    this.options = options;
-    this.apiKey = options.apiKey;
-    this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
-    this.runtime = detectRuntime();
-    warnIfInsecureEndpoint(this.endpoint);
-
-    this.fetch = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
-    if (!this.fetch) {
-      throw new Error("Eventra: fetch not available — provide fetchImpl");
-    }
-
-    this.maxBatch = options.maxBatchSize ?? 50;
-    this.maxQueue = options.maxQueueSize ?? 10000;
-    this.maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
-    this.flushInterval = options.flushInterval ?? 2000;
-    this.retries = options.maxRetries ?? 3;
-    this.retryDelay = options.retryBaseDelayMs ?? 300;
-    // Queued events may carry userId/properties — default on for durability
-    // across reloads, but let privacy-sensitive integrators opt out of ever
-    // writing that data to localStorage.
-    this.persistQueue = options.persistQueue ?? true;
-
-    // Counters of what could not be delivered travel with the next successful
-    // batch; numbers only, never event content. Off with `diagnostics: false`.
-    this.diagnosticsEnabled = options.diagnostics !== false;
-    const shared = this.runtime === "browser" && this.persistQueue;
-    this.diagnostics = new Diagnostics(
-      shared ? new SharedStore(this.storage) : new MemoryStore(),
-      DIAGNOSTICS_KEY,
-      uuidV4,
-      shared ? () => this.scheduleDiagnosticsSync() : undefined,
-    );
-
-    this.sdkInfo = {
-      name: SDK_NAME,
-      version: SDK_VERSION,
-      runtime: this.runtime,
-    };
-
-    if (this.runtime === "browser") {
-      if (this.persistQueue) {
-        this.loadAndMergeQueue();
+    try {
+      this.options = options;
+      this.apiKey = options.apiKey;
+      if (options.endpoint !== undefined && (typeof options.endpoint !== "string" || !options.endpoint.trim())) {
+        warnOption("endpoint", options.endpoint, DEFAULT_ENDPOINT);
       }
-      this.setupQueueSync();
-    }
+      this.endpoint =
+        typeof options.endpoint === "string" && options.endpoint.trim() ? options.endpoint.trim() : DEFAULT_ENDPOINT;
+      if (this.endpoint !== DEFAULT_ENDPOINT && !isUrl(this.endpoint)) {
+        warnOption("endpoint", this.endpoint, DEFAULT_ENDPOINT);
+        this.endpoint = DEFAULT_ENDPOINT;
+      }
+      if (options.multiTabMode !== undefined && options.multiTabMode !== "independent" && options.multiTabMode !== "leader") {
+        warnOption("multiTabMode", options.multiTabMode, "independent");
+      }
+      if (options.diagnostics !== undefined && typeof options.diagnostics !== "boolean") {
+        warnOption("diagnostics", options.diagnostics, "true");
+      }
+      for (const name of ["maxBatchSize", "maxQueueSize"] as const) {
+        const value = options[name];
+        if (typeof value === "number" && Number.isFinite(value) && value >= 1 && !Number.isInteger(value)) {
+          warnOption(name, value, Math.floor(value));
+        }
+      }
+      this.runtime = detectRuntime();
+      warnIfInsecureEndpoint(this.endpoint);
 
-    if (this.runtime === "browser" && options.multiTabMode === "leader") {
-      this.leader = new Leader((isLeader) => {
-        if (isLeader) void this.flush();
-      });
-    }
+      this.fetch = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+      if (!this.fetch) {
+        throw new Error("Eventra: fetch not available - provide fetchImpl");
+      }
 
-    if (!options.disableTimer) {
-      this.startTimer();
-    }
+      this.maxBatch = Math.floor(numberOption("maxBatchSize", options.maxBatchSize, 50, 1));
+      this.maxQueue = Math.floor(numberOption("maxQueueSize", options.maxQueueSize, 10000, 1));
+      this.maxPayloadBytes = numberOption("maxPayloadBytes", options.maxPayloadBytes, DEFAULT_MAX_PAYLOAD_BYTES, 1);
+      this.flushInterval = numberOption("flushInterval", options.flushInterval, 2000, 1, MAX_TIMER_MS);
+      this.retries = numberOption("maxRetries", options.maxRetries, 3, 0, MAX_RETRIES);
+      this.retryDelay = numberOption("retryBaseDelayMs", options.retryBaseDelayMs, 300, 0);
+      this.shutdownBudget = numberOption("shutdownTimeoutMs", options.shutdownTimeoutMs, DEFAULT_SHUTDOWN_TIMEOUT_MS, 0);
+      // Queued events may carry userId/properties - default on for durability
+      // across reloads, but let privacy-sensitive integrators opt out of ever
+      // writing that data to localStorage.
+      this.persistQueue = options.persistQueue ?? true;
 
-    if (this.runtime === "browser") {
-      this.setupBrowserExit();
-    }
+      // Counters of what could not be delivered travel with the next successful
+      // batch; numbers only, never event content. Off with `diagnostics: false`.
+      this.diagnosticsEnabled = options.diagnostics !== false;
+      const shared = this.runtime === "browser" && this.persistQueue;
+      this.diagnostics = new Diagnostics(
+        shared ? new SharedStore(this.storage) : new MemoryStore(),
+        DIAGNOSTICS_KEY,
+        uuidV4,
+        shared ? () => this.scheduleDiagnosticsSync() : undefined,
+      );
 
-    if (options.autoFlushOnExit !== false && this.runtime !== "browser") {
-      this.setupProcessExit();
+      this.sdkInfo = {
+        name: SDK_NAME,
+        version: SDK_VERSION,
+        runtime: this.runtime,
+      };
+
+      if (this.runtime === "browser") {
+        if (this.persistQueue) {
+          this.loadAndMergeQueue();
+        }
+        this.setupQueueSync();
+      }
+
+      if (this.runtime === "browser" && options.multiTabMode === "leader") {
+        this.leader = new Leader((isLeader) => {
+          if (isLeader) void this.flushNow(false);
+        });
+      }
+
+      if (!options.disableTimer) {
+        this.startTimer();
+      }
+
+      if (this.runtime === "browser") {
+        this.setupBrowserExit();
+      }
+
+      if (options.autoFlushOnExit !== false && this.runtime !== "browser") {
+        this.setupProcessExit();
+      }
+
+      // the key must not show in `console.log(tracker)`, `util.inspect` or `JSON.stringify(tracker)`
+      Object.defineProperty(this, "apiKey", { enumerable: false });
+      Object.defineProperty(this, "options", { enumerable: false });
+    } catch (error) {
+      // a constructor that fails must leave nothing behind: not a counted instance, not an open channel,
+      // not a timer or a listener (a BroadcastChannel keeps a Node process alive for good)
+      this.destroyed = true;
+      activeInstances = Math.max(0, activeInstances - 1);
+      for (const undo of [
+        () => clearInterval(this.timer),
+        () => this.leader?.destroy(),
+        () => this.channel?.close(),
+        () => this.exitHandlers.forEach((undoHandler) => undoHandler()),
+      ]) {
+        try {
+          undo();
+        } catch {
+          /* nothing more to undo */
+        }
+      }
+      throw error;
     }
   }
 
   track(name: string, options?: TrackOptions) {
+    // `track()` is called fire-and-forget from anywhere: nothing it meets (a userId getter that throws, a
+    // crypto that throws) may come out of it
+    try {
+      this.trackEvent(name, options);
+    } catch {
+      this.recordDiagnostic("invalid_event");
+      callSafely(this.options.onEventsDropped, 1);
+    }
+  }
+
+  private trackEvent(name: string, options?: TrackOptions) {
     if (this.destroyed || this.shuttingDown) return;
 
     const eventName = normalizeEventName(name);
     if (eventName === null) {
       this.recordDiagnostic("invalid_event");
-      this.options.onEventsDropped?.(1);
+      callSafely(this.options.onEventsDropped, 1);
       return;
     }
 
@@ -592,20 +823,20 @@ export class Eventra {
       // Oversized/too-deep properties can't be safely truncated — drop the
       // event instead of throwing out of a fire-and-forget call site.
       this.recordDiagnostic("invalid_event");
-      this.options.onEventsDropped?.(1);
+      callSafely(this.options.onEventsDropped, 1);
       return;
     }
 
     if (this.queue.length >= this.maxQueue) {
       this.recordDiagnostic("queue_full");
-      this.options.onEventsDropped?.(1);
+      callSafely(this.options.onEventsDropped, 1);
       return;
     }
 
     const event: TrackEvent = {
       idempotencyKey: uuidV4(),
       name: eventName,
-      userId: truncate(options?.userId, MAX_USER_ID),
+      userId: normalizeUserId(options?.userId, MAX_USER_ID),
       properties,
       timestamp: new Date().toISOString(),
     };
@@ -617,16 +848,22 @@ export class Eventra {
       this.broadcast({ type: "queue-add", events: [event] });
     }
 
+    // fire-and-forget triggers start a flush when none is running; one that is running picks the new event up
+    // itself (a flush() of the app, by contrast, waits for it and then sends what is left)
     if (this.queue.length >= this.maxBatch) {
-      void this.flush();
+      void this.flushNow(false);
     }
 
     if (this.runtime === "serverless") {
-      void this.flush();
+      void this.flushNow(false);
     }
   }
 
   async flush(): Promise<void> {
+    // A flush already running (timer, size trigger, serverless auto-flush) must
+    // be awaited, otherwise `await flush()` resolves while events are in flight
+    // and a serverless handler can freeze before they are delivered.
+    if (this.flushPromise) await this.flushPromise.catch(() => undefined);
     return this.flushNow(false);
   }
 
@@ -661,7 +898,7 @@ export class Eventra {
 
   private async runFlush(): Promise<void> {
     try {
-      while (this.queue.length > 0) {
+      while (this.queue.length > 0 && !this.destroyed) {
         const report = this.diagnosticsEnabled
           ? this.diagnostics.claim(this.queue.length, SDK_VERSION)
           : null;
@@ -728,11 +965,17 @@ export class Eventra {
    * `shutdownTimeoutMs` (default 10 s) so a dead or rate-limited server cannot
    * hold a SIGTERM shutdown past a typical grace period.
    */
-  async shutdown(): Promise<void> {
-    if (this.shuttingDown) return;
+  shutdown(): Promise<void> {
+    // a second call (the app's own, after a signal handler started it) waits for the first instead of
+    // returning at once, so `await shutdown()` followed by `process.exit()` does not lose the queue
+    this.shutdownPromise ??= this.runShutdown();
+    return this.shutdownPromise;
+  }
+
+  private async runShutdown(): Promise<void> {
     this.shuttingDown = true;
 
-    const budget = this.options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    const budget = this.shutdownBudget;
     this.shutdownDeadline = Date.now() + Math.max(0, budget);
 
     let budgetTimer: ReturnType<typeof setTimeout> | undefined;
@@ -772,7 +1015,11 @@ export class Eventra {
     this.leader?.destroy();
 
     if (this.channel) {
-      this.channel.close();
+      try {
+        this.channel.close();
+      } catch {
+        /* a channel that cannot be closed must not skip the rest of the teardown */
+      }
       this.channel = undefined;
     }
 
@@ -807,7 +1054,15 @@ export class Eventra {
 
     while (index < this.queue.length && events.length < this.maxBatch) {
       const event = this.queue[index];
-      const eventJson = JSON.stringify(event);
+      let eventJson: string;
+      try {
+        eventJson = JSON.stringify(event);
+      } catch {
+        // cannot be serialized, so it can never be sent: drop it, do not let it
+        // wedge the queue
+        this.dropPoisonEvent(event);
+        continue;
+      }
       const total = bytes + utf8ByteLength(eventJson) + (events.length ? 1 : 0);
 
       if (total > this.maxPayloadBytes) {
@@ -846,13 +1101,16 @@ export class Eventra {
   private dropPoisonEvent(event: TrackEvent) {
     this.recordDiagnostic("too_large");
     this.removeDelivered([event]);
-    this.options.onEventsDropped?.(1);
-    this.options.onDeliveryFailed?.({ status: 413, events: [event] });
+    callSafely(this.options.onEventsDropped, 1);
+    callSafely(this.options.onDeliveryFailed, { status: 413, events: [event] });
   }
 
   private removeDelivered(batch: TrackEvent[]) {
     const keys = new Set(batch.map((e) => e.idempotencyKey));
-    this.queue = this.queue.filter((e) => !keys.has(e.idempotencyKey));
+    // a delivered batch is nearly always the start of the queue: cut it off instead of testing every event
+    // (filtering each batch made draining a large queue quadratic: 300,000 events blocked the loop for minutes)
+    const head = batch.length <= this.queue.length && batch.every((event, index) => this.queue[index] === event);
+    this.queue = head ? this.queue.slice(batch.length) : this.queue.filter((e) => !keys.has(e.idempotencyKey));
 
     if (this.runtime === "browser") {
       this.rememberDelivered(keys);
@@ -895,8 +1153,9 @@ export class Eventra {
     const useKeepalive =
       this.runtime === "browser" &&
       typeof document !== "undefined" &&
-      document.visibilityState === "hidden" &&
-      payloadBytes <= this.maxPayloadBytes;
+      (document.visibilityState === "hidden" || this.leaving) &&
+      // browsers refuse a keepalive body above 64 KiB (the whole request fails), whatever maxPayloadBytes allows
+      payloadBytes <= Math.min(this.maxPayloadBytes, KEEPALIVE_MAX_BYTES);
 
     // A half-open breaker lets exactly one request through as a probe: no
     // retries while we don't know yet whether the endpoint is back.
@@ -914,20 +1173,24 @@ export class Eventra {
       const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
 
       try {
-        const res = await this.fetch(this.endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": this.apiKey,
-          },
-          body: payload,
-          signal: controller.signal,
-          keepalive: useKeepalive,
-          // never follow a redirect: x-api-key is a custom header, so fetch
-          // would forward it to wherever a compromised or misconfigured
-          // endpoint points
-          redirect: "error",
-        });
+        const res = await raceAbort(
+          this.fetch(this.endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": this.apiKey,
+            },
+            body: payload,
+            signal: controller.signal,
+            keepalive: useKeepalive,
+            // never follow a redirect: x-api-key is a custom header, so fetch
+            // would forward it to wherever a compromised or misconfigured
+            // endpoint points
+            redirect: "error",
+          }),
+          controller.signal,
+        );
+        discardBody(res);
 
         if (res.status === 429 || res.status >= 500) {
           throw new RetryableDeliveryError(
@@ -948,7 +1211,8 @@ export class Eventra {
             continue;
           }
           this.recordDiagnostic("rejected", events.length);
-          this.options.onDeliveryFailed?.({ status: res.status, events });
+          // a copy: a callback that empties the array it is given must not empty the batch the SDK is working on
+          callSafely(this.options.onDeliveryFailed, { status: res.status, events: [...events] });
           this.removeDelivered(events);
           return false;
         }
@@ -1043,7 +1307,7 @@ export class Eventra {
 
   private withoutDelivered(events: TrackEvent[]): TrackEvent[] {
     if (!this.deliveredKeys.size) return events;
-    return events.filter((e) => !this.deliveredKeys.has(e.idempotencyKey));
+    return events.filter((e) => !this.deliveredKeys.has(e?.idempotencyKey));
   }
 
   private rememberDelivered(keys: Iterable<string>) {
@@ -1095,7 +1359,7 @@ export class Eventra {
     if (queue.length <= this.maxQueue) return queue;
     const dropped = queue.length - this.maxQueue;
     this.recordDiagnostic("queue_full", dropped);
-    this.options.onEventsDropped?.(dropped);
+    callSafely(this.options.onEventsDropped, dropped);
     return queue.slice(-this.maxQueue);
   }
 
@@ -1111,7 +1375,14 @@ export class Eventra {
 
   private setupQueueSync() {
     if (typeof BroadcastChannel !== "undefined") {
-      this.channel = new BroadcastChannel(CHANNEL_NAME);
+      try {
+        this.channel = new BroadcastChannel(CHANNEL_NAME);
+      } catch {
+        // a browser or a sandbox that refuses the channel: tabs just do not share events
+        this.channel = undefined;
+      }
+    }
+    if (this.channel) {
       this.channel.onmessage = (e: MessageEvent) => {
         const data = e.data;
 
@@ -1146,7 +1417,7 @@ export class Eventra {
 
   private startTimer() {
     this.timer = setInterval(() => {
-      void this.flush();
+      void this.flushNow(false);
     }, this.flushInterval);
     // a library timer must not keep a Node process alive on its own
     (this.timer as { unref?: () => void }).unref?.();
@@ -1161,6 +1432,9 @@ export class Eventra {
     };
 
     const pageHide = () => {
+      // `pagehide` can fire while the page still counts as visible (a navigation, a closed tab): the request
+      // must outlive the page all the same
+      this.leaving = true;
       this.persistNow();
       void this.flush();
     };
@@ -1213,10 +1487,31 @@ export class Eventra {
     };
 
     // A script that tracks something and then simply ends: the (unref'd) timer
-    // no longer keeps it alive, so deliver what is queued before it exits. Runs
-    // once; the pending fetch keeps the loop alive until it settles.
+    // no longer keeps it alive, so deliver what is queued before it exits. The
+    // pending fetch keeps the loop alive until it settles.
+    const listenAgain = () => {
+      if (!this.destroyed) proc.once("beforeExit", onBeforeExit);
+    };
     const onBeforeExit = () => {
-      if (this.queue.length) void this.flush();
+      if (!this.queue.length) {
+        // `beforeExit` fires each time the loop drains, and a script can track more events after this
+        // one: keep listening
+        listenAgain();
+        return;
+      }
+      // The process is ending: bound the flush like shutdown() does, so a hanging server or a long
+      // Retry-After cannot keep it alive for a minute. The deadline is lifted again afterwards in case
+      // the app schedules more work after the loop drained.
+      const own = this.shutdownDeadline === 0;
+      if (own) this.shutdownDeadline = Date.now() + this.shutdownBudget;
+      void this.flush().finally(() => {
+        // the limit stays while events are still queued: a flush the timer starts later must not run without it
+        // and hold the process while the server keeps failing
+        if (own && !this.shuttingDown && !this.queue.length) this.shutdownDeadline = 0;
+        // Only after a flush that delivered everything. When events are still queued the server is not
+        // taking them: trying again on every drain would keep the process alive for as long as it fails.
+        if (!this.queue.length) listenAgain();
+      });
     };
 
     proc.once("SIGINT", handlers.SIGINT);
