@@ -39,11 +39,13 @@ export interface TrackerOptions {
   diagnostics?: boolean;
 
   /**
-   * Node only. On SIGINT/SIGTERM the SDK flushes its queue and does nothing
-   * else (default), so it never interrupts the app's own graceful shutdown.
-   * Registering a signal handler cancels Node's default "exit on signal": if
-   * the SDK is the only handler the app must exit itself. Set `true` to let
-   * the SDK re-raise the signal after the flush when no other listener exists.
+   * Node only. On SIGINT/SIGTERM the SDK flushes its queue (bounded by
+   * `shutdownTimeoutMs`). By default (`true`), when no other listener for the
+   * signal exists, it then re-raises the signal so the process ends as Node
+   * would end it without the SDK; when the app has its own listener the SDK
+   * only flushes and the app owns its shutdown. Set `false` to only flush and
+   * never re-raise: then, if the SDK is the only handler, the app must exit
+   * itself (a signal listener cancels Node's default "exit on signal").
    */
   exitOnSignal?: boolean;
 

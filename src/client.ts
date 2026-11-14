@@ -52,6 +52,10 @@ const PERSIST_DEBOUNCE_MS = 50;
 // accepted a second time.
 const PERSISTED_EVENT_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+// The most the queue may take in localStorage, in characters of JSON (browsers count the quota of about
+// 5M per site in characters). The storage is shared with the host app, whose own writes must keep working:
+// past this, only the newest events are written, the rest stay in the in-memory queue.
+const PERSISTED_QUEUE_MAX_CHARS = 1_000_000;
 // the most a keepalive request may carry: Chrome and Firefox refuse more than 64 KiB
 const KEEPALIVE_MAX_BYTES = 60_000;
 // Keys of events already delivered, remembered so a stale copy in
@@ -69,12 +73,54 @@ function detectRuntime(): Runtime {
     process?: { env?: Record<string, string>; versions?: { node?: string } };
   };
 
-  if (typeof window !== "undefined" && !g.EdgeRuntime) return "browser";
   if (g.EdgeRuntime) return "edge";
+  if (hasBrowserEvents()) return "browser";
   if (g.process?.env?.AWS_LAMBDA_FUNCTION_NAME) return "serverless";
   if (g.process?.versions?.node) return "node";
 
   return "unknown";
+}
+
+/**
+ * A global `window` alone does not make a browser: React Native defines `window` without `addEventListener`,
+ * and Deno 1.x has `window` without `document`. The browser mode needs both event targets.
+ */
+function hasBrowserEvents(): boolean {
+  try {
+    return (
+      typeof window !== "undefined" &&
+      window !== null &&
+      typeof window.addEventListener === "function" &&
+      typeof document !== "undefined" &&
+      document !== null &&
+      typeof document.addEventListener === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Adds a listener and returns how to remove it; a target without the API is skipped instead of throwing. */
+function listen(target: unknown, type: string, listener: (e: never) => void): () => void {
+  const t = target as {
+    addEventListener?: (type: string, listener: unknown) => void;
+    removeEventListener?: (type: string, listener: unknown) => void;
+  } | null | undefined;
+  try {
+    // only called for the targets the browser runtime was detected by, so this is a last guard
+    /* v8 ignore next */
+    if (!t || typeof t.addEventListener !== "function") return () => undefined;
+    t.addEventListener(type, listener);
+  } catch {
+    return () => undefined;
+  }
+  return () => {
+    try {
+      t.removeEventListener?.(type, listener);
+    } catch {
+      /* nothing to remove */
+    }
+  };
 }
 
 // ================= HELPERS =================
@@ -111,6 +157,8 @@ function uuidV4(): string {
 const MAX_TIMER_MS = 2_147_483_647;
 // delivery attempts per batch: a billion would be a way to never give up, not a setting
 const MAX_RETRIES = 20;
+// the ingest API refuses a batch of more than 500 events with 400, which would drop the whole batch
+const MAX_BATCH_SIZE = 500;
 
 function isUrl(value: string): boolean {
   try {
@@ -211,9 +259,31 @@ function normalizeUserId(value: unknown, max: number): string | undefined {
  * Returns `null` for an empty name (event should be dropped); otherwise trims
  * and truncates to `MAX_EVENT_NAME`, matching the documented behavior.
  */
+// What the server removes from a name before storing it: NUL, CR, LF and half of a surrogate pair. Removed here
+// first, so a name made only of those is dropped on its own instead of reaching the server empty, where it fails the
+// whole batch with a 400. A loop, not a regex: lookbehind would be a syntax error in Safari before 16.4.
+function stripUnsafeForName(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 0 || code === 0x0a || code === 0x0d) continue;
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        out += value[i] + value[i + 1];
+        i++;
+      }
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) continue;
+    out += value[i];
+  }
+  return out;
+}
+
 function normalizeEventName(name: string): string | null {
   if (typeof name !== "string") return null;
-  const trimmed = name.trim();
+  const trimmed = stripUnsafeForName(name).trim();
   if (!trimmed) return null;
   // trimmed again after the cut: the CLI catalog holds the name the same way, so a name cut in the middle of a
   // space is the same event in both
@@ -279,6 +349,25 @@ function mergeQueues(...queues: TrackEvent[][]): TrackEvent[] {
   return out;
 }
 
+/** The newest events of the queue that fit in PERSISTED_QUEUE_MAX_CHARS, as a JSON array in queue order. */
+function persistedQueueJson(queue: TrackEvent[]): string {
+  const parts: string[] = [];
+  let chars = 2; // the brackets
+  for (let i = queue.length - 1; i >= 0; i--) {
+    let json: string;
+    try {
+      json = JSON.stringify(queue[i]);
+    } catch {
+      continue;
+    }
+    const next = chars + json.length + (parts.length ? 1 : 0);
+    if (next > PERSISTED_QUEUE_MAX_CHARS) break;
+    parts.push(json);
+    chars = next;
+  }
+  return `[${parts.reverse().join(",")}]`;
+}
+
 // The depth walk visits shared references again for each path, so a fan-out of shared objects would take
 // time that grows with fanout^depth; past this many visits the properties are too large anyway.
 const MAX_PROPERTIES_NODES = 50_000;
@@ -296,17 +385,17 @@ function validateProperties(
   ) {
     throw new Error("Eventra: properties must be an object");
   }
+  // Own keys are listed once per object with Object.keys (what JSON.stringify sends). Listing the keys of an
+  // object costs time for each of them whatever is used (V8 builds the whole list even for a `for...in` that
+  // stops at once), so a huge object is listed only once and refused right after: past the node budget it could
+  // never fit in MAX_PROPERTIES_JSON_BYTES anyway.
+  const topKeys = Object.keys(properties as object);
   // Nothing to walk or measure for an empty object (the common case), but it is still copied: the caller
   // keeps its own object and may fill it in later.
-  let hasKeys = false;
-  for (const _ in properties as object) {
-    hasKeys = true;
-    break;
-  }
-  if (!hasKeys) return {};
+  if (topKeys.length === 0) return {};
 
   let visited = 0;
-  const depth = (obj: unknown, level: number): void => {
+  const depth = (obj: unknown, level: number, keys?: string[]): void => {
     if (level > MAX_PROPERTIES_DEPTH) {
       throw new Error(`Eventra: properties exceed max depth (${MAX_PROPERTIES_DEPTH})`);
     }
@@ -315,16 +404,20 @@ function validateProperties(
     }
     if (obj === null || typeof obj !== "object") return;
     if (Array.isArray(obj)) {
+      if (visited + obj.length > MAX_PROPERTIES_NODES) {
+        throw new Error("Eventra: properties are too large to check");
+      }
       for (const item of obj) depth(item, level + 1);
       return;
     }
-    // not Object.values(): a million keys would be copied into a list before the budget could stop the walk
-    for (const key in obj as Record<string, unknown>) {
-      if (Object.prototype.hasOwnProperty.call(obj, key)) depth((obj as Record<string, unknown>)[key], level + 1);
+    const own = keys ?? Object.keys(obj);
+    if (visited + own.length > MAX_PROPERTIES_NODES) {
+      throw new Error("Eventra: properties are too large to check");
     }
+    for (const key of own) depth((obj as Record<string, unknown>)[key], level + 1);
   };
 
-  depth(properties, 0);
+  depth(properties, 0, topKeys);
 
   const json = JSON.stringify(properties);
   if (json === undefined || utf8ByteLength(json) > MAX_PROPERTIES_JSON_BYTES) {
@@ -406,9 +499,21 @@ class Storage {
   }
 
   set(key: string, value: unknown) {
+    let json: string;
+    try {
+      json = JSON.stringify(value);
+    } catch {
+      // only the diagnostics counters are written here, plain numbers and strings
+      /* v8 ignore next */
+      return;
+    }
+    this.setRaw(key, json);
+  }
+
+  setRaw(key: string, json: string) {
     if (!this.enabled) return;
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      localStorage.setItem(key, json);
     } catch {
       /* quota exceeded */
     }
@@ -445,7 +550,7 @@ class Leader {
   private isLeader = false;
   private heartbeat?: ReturnType<typeof setInterval>;
   private election?: ReturnType<typeof setInterval>;
-  private onStorage?: (e: StorageEvent) => void;
+  private offStorage?: () => void;
 
   constructor(private onLeadershipChange?: (isLeader: boolean) => void) {
     if (!storageAvailable()) {
@@ -457,18 +562,11 @@ class Leader {
 
     this.election = setInterval(() => this.tick(), LEADER_TTL_MS / 2);
 
-    // Leader is only ever constructed from Eventra's constructor when
-    // `this.runtime === "browser"`, and detectRuntime() only returns
-    // "browser" when `window` is defined — so by the time this code runs
-    // (having already passed the localStorage check above), window is
-    // guaranteed to be defined too.
-    /* v8 ignore else */
-    if (typeof window !== "undefined") {
-      this.onStorage = (e: StorageEvent) => {
-        if (e.key === LEADER_KEY) this.tick();
-      };
-      window.addEventListener("storage", this.onStorage);
-    }
+    // Leader is only constructed in the browser runtime, so `window` exists; listen() still never throws
+    /* v8 ignore next */
+    this.offStorage = listen(typeof window !== "undefined" ? window : undefined, "storage", (e: StorageEvent) => {
+      if (e.key === LEADER_KEY) this.tick();
+    });
   }
 
   private tick() {
@@ -559,9 +657,7 @@ class Leader {
   destroy() {
     if (this.election) clearInterval(this.election);
     if (this.heartbeat) clearInterval(this.heartbeat);
-    if (this.onStorage && typeof window !== "undefined") {
-      window.removeEventListener("storage", this.onStorage);
-    }
+    this.offStorage?.();
     if (this.isLeader && storageAvailable()) {
       try {
         const raw = localStorage.getItem(LEADER_KEY);
@@ -637,7 +733,7 @@ export class Eventra {
   private storage = new Storage();
   private leader: Leader | null = null;
   private channel?: BroadcastChannel;
-  private onStorageQueue?: (e: StorageEvent) => void;
+  private offStorageQueue?: () => void;
 
   private failureCount = 0;
   private warnedRedirect = false;
@@ -717,7 +813,10 @@ export class Eventra {
         throw new Error("Eventra: fetch not available - provide fetchImpl");
       }
 
-      this.maxBatch = Math.floor(numberOption("maxBatchSize", options.maxBatchSize, 50, 1));
+      if (typeof options.maxBatchSize === "number" && options.maxBatchSize > MAX_BATCH_SIZE && Number.isFinite(options.maxBatchSize)) {
+        warnOption("maxBatchSize", options.maxBatchSize, MAX_BATCH_SIZE);
+      }
+      this.maxBatch = Math.min(MAX_BATCH_SIZE, Math.floor(numberOption("maxBatchSize", options.maxBatchSize, 50, 1)));
       this.maxQueue = Math.floor(numberOption("maxQueueSize", options.maxQueueSize, 10000, 1));
       this.maxPayloadBytes = numberOption("maxPayloadBytes", options.maxPayloadBytes, DEFAULT_MAX_PAYLOAD_BYTES, 1);
       this.flushInterval = numberOption("flushInterval", options.flushInterval, 2000, 1, MAX_TIMER_MS);
@@ -1023,9 +1122,7 @@ export class Eventra {
       this.channel = undefined;
     }
 
-    if (this.onStorageQueue && typeof window !== "undefined") {
-      window.removeEventListener("storage", this.onStorageQueue);
-    }
+    this.offStorageQueue?.();
 
     for (const off of this.exitHandlers) {
       off();
@@ -1352,7 +1449,7 @@ export class Eventra {
       this.queue,
     );
     this.queue = this.trimQueue(merged);
-    this.storage.set(QUEUE_KEY, this.queue);
+    this.storage.setRaw(QUEUE_KEY, persistedQueueJson(this.queue));
   }
 
   private trimQueue(queue: TrackEvent[] = this.queue): TrackEvent[] {
@@ -1407,11 +1504,10 @@ export class Eventra {
     }
 
     if (this.persistQueue && typeof window !== "undefined") {
-      this.onStorageQueue = (e: StorageEvent) => {
+      this.offStorageQueue = listen(window, "storage", (e: StorageEvent) => {
         if (e.key !== QUEUE_KEY) return;
         this.loadAndMergeQueue();
-      };
-      window.addEventListener("storage", this.onStorageQueue);
+      });
     }
   }
 
@@ -1436,18 +1532,97 @@ export class Eventra {
       // must outlive the page all the same
       this.leaving = true;
       this.persistNow();
-      void this.flush();
+      if (this.inFlight) {
+        // flush() would wait for the request in flight, which the browser cancels on unload, so the keepalive
+        // send would never start
+        this.sendOnLeave();
+      } else {
+        void this.flush();
+      }
     };
 
-    // `visibilitychange` only ever fires on `document`, never on `window` —
-    // `pagehide` is the opposite, a `window`-only event.
-    document.addEventListener("visibilitychange", handler);
-    window.addEventListener("pagehide", pageHide);
+    // a page restored from the back/forward cache is not being left any more: later sends are normal requests
+    const pageShow = () => {
+      this.leaving = false;
+    };
 
-    this.exitHandlers.push(() => {
-      document.removeEventListener("visibilitychange", handler);
-      window.removeEventListener("pagehide", pageHide);
-    });
+    // `visibilitychange` only ever fires on `document`, never on `window` -
+    // `pagehide` and `pageshow` are the opposite, `window`-only events.
+    const offs = [
+      listen(document, "visibilitychange", handler),
+      listen(window, "pagehide", pageHide),
+      listen(window, "pageshow", pageShow),
+    ];
+
+    this.exitHandlers.push(() => offs.forEach((off) => off()));
+  }
+
+  /**
+   * The page is being left while a request is in flight: send what is queued at once with keepalive, without
+   * waiting for that request. The events of the batch in flight go along too (after the others, as far as the
+   * keepalive size allows), since the browser cancels that request on unload; if it did arrive, the server
+   * drops the copies by their idempotencyKey. The queue is not changed unless the reply is seen.
+   */
+  private sendOnLeave() {
+    // a tab that lost leadership while its request was in flight leaves the sending to the new leader
+    if (this.leader && !this.leader.canSend()) return;
+
+    // `sending` is set whenever a flush is in flight and the page can see it
+    /* v8 ignore next */
+    const inFlightKeys = new Set((this.sending ?? []).map((e) => e.idempotencyKey));
+    const candidates = [
+      ...this.queue.filter((e) => !inFlightKeys.has(e.idempotencyKey)),
+      ...this.queue.filter((e) => inFlightKeys.has(e.idempotencyKey)),
+    ];
+
+    const limit = Math.min(this.maxPayloadBytes, KEEPALIVE_MAX_BYTES);
+    const sentAt = new Date().toISOString();
+    let bytes = utf8ByteLength(JSON.stringify({ sentAt, sdk: this.sdkInfo, events: [] }));
+    const events: TrackEvent[] = [];
+    const json: string[] = [];
+    for (const event of candidates) {
+      // the server's limit per batch; the keepalive size limit is normally reached first
+      /* v8 ignore next */
+      if (events.length >= MAX_BATCH_SIZE) break;
+      let eventJson: string;
+      try {
+        eventJson = JSON.stringify(event);
+      } catch {
+        continue;
+      }
+      const total = bytes + utf8ByteLength(eventJson) + (events.length ? 1 : 0);
+      // a smaller event further on may still fit
+      if (total > limit) continue;
+      events.push(event);
+      json.push(eventJson);
+      bytes = total;
+    }
+    if (!events.length) return;
+
+    const head = JSON.stringify({ sentAt, sdk: this.sdkInfo });
+    const body = `${head.slice(0, -1)},"events":[${json.join(",")}]}`;
+    try {
+      const request = this.fetch(this.endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": this.apiKey,
+        },
+        body,
+        keepalive: true,
+        redirect: "error",
+      });
+      Promise.resolve(request).then(
+        (res) => {
+          discardBody(res);
+          // seen only when the page stays (a bfcache restore): what was accepted is not sent again
+          if (res.ok && !this.destroyed) this.removeDelivered(events);
+        },
+        () => undefined,
+      );
+    } catch {
+      /* the events stay queued (and in localStorage) for the next visit */
+    }
   }
 
   private setupProcessExit() {
@@ -1455,6 +1630,8 @@ export class Eventra {
       pid?: number;
       on: (event: string, listener: (...args: unknown[]) => void) => void;
       once: (event: string, listener: (...args: unknown[]) => void) => void;
+      prependOnceListener?: (event: string, listener: (...args: unknown[]) => void) => void;
+      exit?: (code?: number) => void;
       off?: (event: string, listener: (...args: unknown[]) => void) => void;
       listenerCount?: (event: string) => number;
       kill?: (pid: number, signal: string) => void;
@@ -1462,25 +1639,40 @@ export class Eventra {
     const proc = (globalThis as { process?: Proc }).process;
     if (!proc?.on) return;
 
-    // Flush the queue and nothing else: the app owns its own shutdown. We do
-    // NOT re-raise the signal by default, because apps that use
-    // `process.once` or NestJS shutdown hooks have already removed their
-    // listener by now and a re-raise would kill them in the middle of their
-    // graceful shutdown. Note that registering any handler cancels Node's
-    // default "exit on SIGINT/SIGTERM": if the SDK is the only handler, the
-    // app has to exit itself, or set `exitOnSignal: true`, which re-raises the
-    // signal after the flush when nobody else is listening.
-    const exitOnSignal = this.options.exitOnSignal === true;
+    // Registering any handler cancels Node's default "exit on SIGINT/SIGTERM". So by default the SDK behaves
+    // like that default: when nobody else listens to the signal, it flushes (bounded by shutdownTimeoutMs) and
+    // then re-raises the signal so the process ends as it would have without the SDK. When the app has its own
+    // listener, the SDK only flushes and the app owns its shutdown. Whether others listen is decided when the
+    // signal arrives, not after the flush: an app that uses `process.once` or NestJS shutdown hooks removes its
+    // listener while it shuts down, and a re-raise then would cut that shutdown off. The SDK's own listener is
+    // put first, so at that moment every other listener is still registered. `exitOnSignal: false` turns the
+    // re-raise off (flush only).
+    const exitOnSignal = this.options.exitOnSignal !== false;
     const onSignal = (signal: string) => () => {
+      // a once-listener has removed itself already when emitted; removing it here too makes the count below
+      // everyone else whichever way this handler was called
+      proc.off?.(signal, handlers[signal]);
+      const othersAtSignal = (proc.listenerCount?.(signal) ?? 0) > 0;
       void this.shutdown().finally(() => {
-        if (!exitOnSignal) return;
-        proc.off?.(signal, handlers[signal]);
+        if (!exitOnSignal || othersAtSignal) return;
         const othersListening = (proc.listenerCount?.(signal) ?? 0) > 0;
-        if (!othersListening && proc.kill && proc.pid !== undefined) {
+        if (othersListening) return;
+        if (proc.pid === 1 && proc.exit) {
+          // PID 1 (a container without an init) ignores a signal it has no handler for, so a re-raise would do
+          // nothing: exit with the code the signal would have given
+          proc.exit(128 + (signal === "SIGINT" ? 2 : 15));
+          return;
+        }
+        if (proc.kill && proc.pid !== undefined) {
           proc.kill(proc.pid, signal);
         }
       });
     };
+    // first in line, so the check above still sees every other listener (see the note above)
+    const listenFirst = (event: string, listener: () => void) =>
+      typeof proc.prependOnceListener === "function"
+        ? proc.prependOnceListener(event, listener)
+        : proc.once(event, listener);
     const handlers: Record<string, () => void> = {
       SIGINT: onSignal("SIGINT"),
       SIGTERM: onSignal("SIGTERM"),
@@ -1514,8 +1706,8 @@ export class Eventra {
       });
     };
 
-    proc.once("SIGINT", handlers.SIGINT);
-    proc.once("SIGTERM", handlers.SIGTERM);
+    listenFirst("SIGINT", handlers.SIGINT);
+    listenFirst("SIGTERM", handlers.SIGTERM);
     proc.once("beforeExit", onBeforeExit);
 
     this.exitHandlers.push(() => {

@@ -58,14 +58,15 @@ describe("browser queue persistence (coalesced)", () => {
   it("writes localStorage once for a burst of track() calls", async () => {
     const { fetchImpl } = createMockFetch({ responses: [200] });
     const setSpy = vi.spyOn(env!.storage, "setItem");
-    const sdk = make(fetchImpl, { maxBatchSize: 1000 });
+    // maxBatchSize is capped at 500, so stay one below it to avoid a size-triggered send
+    const sdk = make(fetchImpl, { maxBatchSize: 500 });
 
-    for (let i = 0; i < 500; i++) sdk.track(`evt.${i % 5}`);
+    for (let i = 0; i < 499; i++) sdk.track(`evt.${i % 5}`);
 
     const queueWrites = () => setSpy.mock.calls.filter((c) => c[0] === QUEUE_KEY).length;
     expect(queueWrites()).toBe(0); // nothing written synchronously
     await vi.waitFor(() => expect(queueWrites()).toBe(1));
-    expect(JSON.parse(env!.storage.getItem(QUEUE_KEY) as string)).toHaveLength(500);
+    expect(JSON.parse(env!.storage.getItem(QUEUE_KEY) as string)).toHaveLength(499);
   });
 
   it("writes immediately on pagehide and when the tab becomes hidden", async () => {
@@ -222,53 +223,151 @@ describe("process exit and timers (node)", () => {
     expect(timer.hasRef()).toBe(false);
   });
 
+  // the SDK puts its signal listener first (prependOnceListener) so it can see every other listener
+  const signalHandler = (spy: { mock: { calls: unknown[][] } }, signal: string) =>
+    spy.mock.calls.find((c) => c[0] === signal)![1] as () => void;
+
   it("re-raises the signal after flushing when nothing else listens", async () => {
-    const onceSpy = vi.spyOn(process, "once");
+    const prependSpy = vi.spyOn(process, "prependOnceListener");
     const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
     const { fetchImpl, calls } = createMockFetch({ responses: [200] });
     const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl, exitOnSignal: true });
     active.push(sdk);
 
-    const sigterm = onceSpy.mock.calls.find((c) => c[0] === "SIGTERM")![1] as () => void;
+    const sigterm = signalHandler(prependSpy, "SIGTERM");
     sdk.track("bye");
     sigterm();
     await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM"));
     expect(calls).toHaveLength(1);
   });
 
-  it("by default flushes on a signal and never re-raises it (the app owns its shutdown)", async () => {
-    const onceSpy = vi.spyOn(process, "once");
+  it("by default re-raises the signal after the flush when nothing else listens, like Node without the SDK", async () => {
+    const prependSpy = vi.spyOn(process, "prependOnceListener");
     const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
     const { fetchImpl, calls } = createMockFetch({ responses: [200] });
     const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl });
     active.push(sdk);
 
-    const sigterm = onceSpy.mock.calls.find((c) => c[0] === "SIGTERM")![1] as () => void;
+    const sigterm = signalHandler(prependSpy, "SIGTERM");
+    sdk.track("bye");
+    sigterm();
+    await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM"));
+    // the flush came first
+    expect(calls).toHaveLength(1);
+  });
+
+  it("with exitOnSignal: false flushes on a signal and never re-raises it (the app owns its shutdown)", async () => {
+    const prependSpy = vi.spyOn(process, "prependOnceListener");
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const { fetchImpl, calls } = createMockFetch({ responses: [200] });
+    const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl, exitOnSignal: false });
+    active.push(sdk);
+
+    const sigterm = signalHandler(prependSpy, "SIGTERM");
     sdk.track("bye");
     sigterm();
     await vi.waitFor(() => expect(calls).toHaveLength(1));
-    // even with the SDK's own once-handler consumed and the app's gone, the
-    // SDK must not kill the process mid-shutdown
     await new Promise((r) => setTimeout(r, 50));
     expect(kill).not.toHaveBeenCalled();
   });
 
   it("does not kill the process when the app has its own signal handler", async () => {
-    const onceSpy = vi.spyOn(process, "once");
+    const prependSpy = vi.spyOn(process, "prependOnceListener");
     const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
     const appHandler = () => undefined;
     process.on("SIGINT", appHandler); // the app has its own handler
     const { fetchImpl, calls } = createMockFetch({ responses: [200] });
-    const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl, exitOnSignal: true });
+    const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl });
     active.push(sdk);
 
-    const sigint = onceSpy.mock.calls.find((c) => c[0] === "SIGINT")![1] as () => void;
+    const sigint = signalHandler(prependSpy, "SIGINT");
     sdk.track("bye");
     sigint();
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     await new Promise((r) => setTimeout(r, 50));
     process.off("SIGINT", appHandler);
     expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("does not kill an app whose once-listener (registered before the SDK) is already gone when the flush ends", async () => {
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    let appRan = false;
+    // like `process.once` in the app or NestJS shutdown hooks: the listener is removed as soon as it runs
+    process.once("SIGTERM", () => {
+      appRan = true;
+    });
+    const { fetchImpl, calls } = createMockFetch({ responses: [200] });
+    const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl, exitOnSignal: true });
+    active.push(sdk);
+
+    sdk.track("bye");
+    // emits to the listeners only, no real signal is sent
+    process.emit("SIGTERM" as never);
+    expect(appRan).toBe(true);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(process.listenerCount("SIGTERM")).toBe(0);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("does not re-raise when the app adds its own listener while the SDK flushes", async () => {
+    const prependSpy = vi.spyOn(process, "prependOnceListener");
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const fetchImpl = (async () => {
+      await gate;
+      return { status: 200, ok: true } as Response;
+    }) as unknown as typeof fetch;
+    const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl });
+    active.push(sdk);
+
+    const sigterm = signalHandler(prependSpy, "SIGTERM");
+    sdk.track("bye");
+    sigterm();
+    const appHandler = () => undefined;
+    process.on("SIGTERM", appHandler);
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    process.off("SIGTERM", appHandler);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("as PID 1 (a container without an init, where a re-raised signal is ignored) exits with the signal's code", async () => {
+    const original = globalThis.process;
+    const handlers = new Map<string, () => void>();
+    const kill = vi.fn();
+    const exit = vi.fn();
+    const fake = {
+      env: {},
+      versions: { node: "22.0.0" },
+      pid: 1,
+      on: () => undefined,
+      once: () => undefined,
+      prependOnceListener: (event: string, fn: () => void) => handlers.set(event, fn),
+      off: () => undefined,
+      listenerCount: () => 0,
+      kill,
+      exit,
+    };
+    Object.defineProperty(globalThis, "process", { value: fake, configurable: true, writable: true });
+    try {
+      const { fetchImpl, calls } = createMockFetch({ responses: [200] });
+      const sdk = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl });
+      sdk.track("bye");
+      handlers.get("SIGTERM")!();
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(143));
+      expect(calls).toHaveLength(1);
+      expect(kill).not.toHaveBeenCalled();
+      sdk.destroy();
+
+      const second = new Eventra({ apiKey: "k", disableTimer: true, fetchImpl });
+      handlers.get("SIGINT")!();
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(130));
+      second.destroy();
+    } finally {
+      Object.defineProperty(globalThis, "process", { value: original, configurable: true, writable: true });
+    }
   });
 
   it("flushes what is still queued on beforeExit", async () => {

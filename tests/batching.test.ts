@@ -55,6 +55,30 @@ describe("batching", () => {
     expect(sizes).toEqual([2, 2, 1]);
   });
 
+  it("caps maxBatchSize at the server's 500-event limit, with a warning", async () => {
+    // a batch above 500 is refused by the ingest API with 400 and dropped whole
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { fetchImpl, calls } = createMockFetch({ responses: [200, 200] });
+    const sdk = new Eventra({
+      apiKey: "k",
+      disableTimer: true,
+      autoFlushOnExit: false,
+      fetchImpl,
+      maxBatchSize: 600,
+      maxPayloadBytes: 10_000_000,
+    });
+    active.push(sdk);
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"maxBatchSize" is invalid (600), using 500'));
+    warn.mockRestore();
+
+    for (let i = 0; i < 600; i++) sdk.track(`e${i}`);
+    await sdk.flush();
+    await vi.waitFor(() => expect(calls.length).toBe(2));
+
+    expect(calls.map((c) => c.body.events.length)).toEqual([500, 100]);
+  });
+
   it("does nothing when flushed with empty queue", async () => {
     const { fetchImpl, calls } = createMockFetch({ responses: [200] });
     const sdk = new Eventra({

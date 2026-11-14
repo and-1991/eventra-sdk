@@ -232,10 +232,17 @@ describe("in a browser", () => {
   });
 
   it("closes the channel and the leader lease when it fails late in a browser", () => {
-    env.document.addEventListener = () => {
-      throw new Error("no document for you");
-    };
-    expect(() => make({ multiTabMode: "leader" })).toThrow("no document");
+    const original = Object.defineProperty;
+    const spy = vi.spyOn(Object, "defineProperty").mockImplementation(((target: object, key: PropertyKey, descriptor: PropertyDescriptor) => {
+      if (key === "apiKey") throw new Error("cannot hide the key");
+      return original(target, key, descriptor);
+    }) as typeof Object.defineProperty);
+    try {
+      expect(() => make({ multiTabMode: "leader" })).toThrow("cannot hide");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(env.storage.getItem("__eventra_leader__")).toBeNull();
   });
 
   it("leader mode survives a localStorage that throws on access (a sandboxed iframe)", async () => {
@@ -358,7 +365,7 @@ describe("the exit flush, the options and odd values", () => {
     expect(calls[0].body.events.map((e) => e.userId)).toEqual([undefined, undefined, "7"]);
   });
 
-  it("a properties object with a million keys is refused without being copied into a list first", async () => {
+  it("a properties object with a million keys is refused after listing its keys once (listing them is the only cost left)", async () => {
     const big: Record<string, number> = {};
     for (let i = 0; i < 1_000_000; i++) big[`k${i}`] = i;
     const dropped = vi.fn();
@@ -367,6 +374,26 @@ describe("the exit flush, the options and odd values", () => {
     sdk.track("a", { properties: big });
     expect(Date.now() - started).toBeLessThan(1500);
     expect(dropped).toHaveBeenCalledWith(1);
+  });
+
+  it("a big object nested inside, or a long list, is refused before its items are walked", async () => {
+    const dropped = vi.fn();
+    const { sdk, calls } = make({ onEventsDropped: dropped });
+    const wide: Record<string, number> = {};
+    for (let i = 0; i < 60_000; i++) wide[`k${i}`] = i;
+    sdk.track("a", { properties: { nested: wide } });
+    sdk.track("b", { properties: { list: new Array(60_000).fill(1) } });
+    // each object alone is under the budget, together they are not
+    const almost: Record<string, number> = {};
+    for (let i = 0; i < 49_990; i++) almost[`k${i}`] = i;
+    const spread: Record<string, unknown> = { almost };
+    for (let i = 0; i < 20; i++) spread[`p${i}`] = i;
+    sdk.track("d", { properties: spread });
+    sdk.track("c", { properties: { fine: [1, 2, { x: "y" }] } });
+    expect(dropped).toHaveBeenCalledTimes(3);
+    await sdk.flush();
+    expect(calls[0].body.events.map((e) => e.name)).toEqual(["c"]);
+    expect(calls[0].body.events[0].properties).toEqual({ fine: [1, 2, { x: "y" }] });
   });
 
   it("properties inherited from a prototype are not walked or sent, only the object's own", async () => {

@@ -68,6 +68,23 @@ describe("track() validation", () => {
     expect(calls[0].body.events[0].name).toBe("user.signup");
   });
 
+  it("drops a name made only of characters the server removes, and keeps the rest of the batch", async () => {
+    const { sdk, calls } = makeSdk();
+    sdk.track("\u0000\r\n");
+    sdk.track("\ud800");
+    sdk.track("ok.event");
+    await sdk.flush();
+    const names = calls.flatMap((c) => c.body.events.map((e: { name: string }) => e.name));
+    expect(names).toEqual(["ok.event"]);
+  });
+
+  it("removes NUL, CR, LF and lone surrogates from a name, keeping whole emoji", async () => {
+    const { sdk, calls } = makeSdk();
+    sdk.track("a\u0000b\nc\rd\udc00e\ud83d\ude00");
+    await sdk.flush();
+    expect(calls[0].body.events[0].name).toBe("abcde\ud83d\ude00");
+  });
+
   it("sends names with spaces and colons unchanged (third-party style names)", async () => {
     const { sdk, calls } = makeSdk();
     sdk.track("App: User Sign Up");
