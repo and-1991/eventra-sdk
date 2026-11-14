@@ -61,6 +61,12 @@ const KEEPALIVE_MAX_BYTES = 60_000;
 // Keys of events already delivered, remembered so a stale copy in
 // localStorage or from another tab cannot put them back in the queue.
 const DELIVERED_KEYS_MAX = 10_000;
+// In the default `independent` mode every tab holds every tab's events (so the events of a tab that closes
+// are not lost). An event another open tab just announced is left to that tab this long: it sends within
+// its flush interval and tells the others it was delivered. Sent by everyone at once, each event went out
+// once per open tab. Events read from storage (an earlier page, a closed tab) are sent at once, as before.
+const LIVE_TAB_GRACE_MS = 15_000;
+const LIVE_TAB_KEYS_MAX = 10_000;
 
 let activeInstances = 0;
 
@@ -473,6 +479,14 @@ class RetryableDeliveryError extends Error {
   }
 }
 
+// the SDK was destroyed between two attempts: stop retrying, the batch is neither failed nor delivered
+class DeliveryStopped extends Error {
+  constructor() {
+    super("delivery stopped by destroy()");
+    this.name = "DeliveryStopped";
+  }
+}
+
 // ================= STORAGE =================
 class Storage {
   private enabled = false;
@@ -487,6 +501,11 @@ class Storage {
     } catch {
       /* private mode / blocked storage */
     }
+  }
+
+  // localStorage works here (not in Node, a blocked or private-mode browser)
+  get isEnabled(): boolean {
+    return this.enabled;
   }
 
   get(key: string): unknown {
@@ -714,6 +733,8 @@ export class Eventra {
 
   private queue: TrackEvent[] = [];
   private sending: TrackEvent[] | null = null;
+  // events other open tabs announced on the channel, by key, and until when they are theirs to send
+  private liveTabEvents = new Map<string, number>();
   private inFlight = false;
   private destroyed = false;
   private shuttingDown = false;
@@ -1111,6 +1132,17 @@ export class Eventra {
     // write any pending queue state before the listeners go away
     this.persistNow();
 
+    // Without storage the queue goes with this instance (Node, where a saved queue is never read back,
+    // `persistQueue: false`, or a browser that refuses localStorage): say how many events that is, as
+    // for every other drop. A batch still in flight is not counted, its request may yet arrive.
+    // (shutdown() with the circuit breaker open used to drop them without a word.)
+    const kept = this.runtime === "browser" && this.persistQueue && this.storage.isEnabled;
+    if (!kept) {
+      const inFlight = new Set(this.sending ?? []);
+      const lost = this.queue.filter((event) => !inFlight.has(event)).length;
+      if (lost > 0) callSafely(this.options.onEventsDropped, lost);
+    }
+
     this.leader?.destroy();
 
     if (this.channel) {
@@ -1151,6 +1183,10 @@ export class Eventra {
 
     while (index < this.queue.length && events.length < this.maxBatch) {
       const event = this.queue[index];
+      if (this.leftToItsTab(event)) {
+        index++;
+        continue;
+      }
       let eventJson: string;
       try {
         eventJson = JSON.stringify(event);
@@ -1348,6 +1384,8 @@ export class Eventra {
         }
 
         await sleep(wait);
+        // destroy() during the wait: no more attempts (they used to go on after it)
+        if (this.destroyed) throw new DeliveryStopped();
       } finally {
         clearTimeout(timeout);
       }
@@ -1454,10 +1492,38 @@ export class Eventra {
 
   private trimQueue(queue: TrackEvent[] = this.queue): TrackEvent[] {
     if (queue.length <= this.maxQueue) return queue;
-    const dropped = queue.length - this.maxQueue;
-    this.recordDiagnostic("queue_full", dropped);
-    callSafely(this.options.onEventsDropped, dropped);
+    const removed = queue.slice(0, queue.length - this.maxQueue);
+    // every open tab holds every tab's events and trims the same ones: an event another open tab announced
+    // is that tab's to count, so a dropped event is reported once, not once per open tab
+    const dropped = removed.filter((e) => !this.liveTabEvents.has(e?.idempotencyKey)).length;
+    if (dropped > 0) {
+      this.recordDiagnostic("queue_full", dropped);
+      callSafely(this.options.onEventsDropped, dropped);
+    }
     return queue.slice(-this.maxQueue);
+  }
+
+  // events another open tab just announced on the channel, with the time until which that tab sends them
+  private rememberLiveTabEvents(events: TrackEvent[]) {
+    const until = Date.now() + LIVE_TAB_GRACE_MS;
+    for (const event of events) {
+      const key = event?.idempotencyKey;
+      if (typeof key === "string" && !this.liveTabEvents.has(key)) this.liveTabEvents.set(key, until);
+    }
+    // Map iterates in insertion order: the oldest keys go first
+    for (const key of this.liveTabEvents.keys()) {
+      if (this.liveTabEvents.size <= LIVE_TAB_KEYS_MAX) break;
+      this.liveTabEvents.delete(key);
+    }
+  }
+
+  // In `independent` mode, an event another open tab announced less than LIVE_TAB_GRACE_MS ago is that
+  // tab's to send. After that (the tab was closed, or it cannot reach the server either) anyone sends it.
+  // The leader in `leader` mode sends everything, so it never waits.
+  private leftToItsTab(event: TrackEvent): boolean {
+    if (this.leader) return false;
+    const until = this.liveTabEvents.get(event?.idempotencyKey);
+    return until !== undefined && Date.now() < until;
   }
 
   // Sends only what changed (a new event, or the keys just delivered) instead
@@ -1486,6 +1552,7 @@ export class Eventra {
         if (data?.type === "delivered" && Array.isArray(data.keys)) {
           const keys = new Set<string>(data.keys as string[]);
           this.rememberDelivered(keys);
+          for (const key of keys) this.liveTabEvents.delete(key);
           this.queue = this.queue.filter((ev) => !keys.has(ev.idempotencyKey));
           return;
         }
@@ -1498,7 +1565,9 @@ export class Eventra {
         ) {
           return;
         }
-        this.queue = mergeQueues(this.queue, this.withoutDelivered(data.events as TrackEvent[]));
+        const announced = this.withoutDelivered(data.events as TrackEvent[]);
+        this.rememberLiveTabEvents(announced);
+        this.queue = mergeQueues(this.queue, announced);
         this.queue = this.trimQueue();
       };
     }

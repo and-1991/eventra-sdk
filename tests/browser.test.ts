@@ -124,7 +124,10 @@ describe("browser mode", () => {
       ],
     });
 
+    // the other tab had its 15 s to send it (S10): now this one does
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 16_000);
     await sdk.flush();
+    vi.restoreAllMocks();
     expect(calls.length).toBe(1);
     expect(calls[0].body.events.map((e) => e.name).sort()).toEqual([
       "local.a",
@@ -239,7 +242,10 @@ describe("browser mode", () => {
       ],
     });
 
+    // the other tab had its 15 s to send it (S10): now this one does
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 16_000);
     await sdk.flush();
+    vi.restoreAllMocks();
     expect(env.storage.getItem("__eventra_q__")).toBeNull();
     expect(calls[0]?.body.events.map((e) => e.name).sort()).toEqual([
       "local.a",

@@ -102,6 +102,8 @@ describe("leaving the page while a request is in flight", () => {
     const at = new Date().toISOString();
     // larger than a keepalive request may be, but within maxPayloadBytes: it goes out as a normal request
     other.postMessage({ type: "queue-add", events: [{ idempotencyKey: "big", name: "big", properties: { f: "z".repeat(70_000) }, timestamp: at }] });
+    // the other tab had its 15 s to send it (S10): now this one does
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 16_000);
     void sdk.flush();
     expect(sent).toHaveLength(1);
     // a BigInt survives a BroadcastChannel but not JSON

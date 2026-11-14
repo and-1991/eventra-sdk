@@ -438,6 +438,8 @@ describe("more behavior in a browser", () => {
     const { sdk, calls } = make({});
     const Channel = (globalThis as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel;
     new Channel("eventra-sdk").postMessage({ type: "queue-add", events: [{ idempotencyKey: "bc1", name: "remote", properties: {}, timestamp: "notadate" }] });
+    // the other tab had its 15 s to send it (S10): now this one does
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 16_000);
     await sdk.flush();
     expect(calls).toHaveLength(1);
     expect(Number.isNaN(Date.parse(String(calls[0].body.events[0].timestamp)))).toBe(false);
