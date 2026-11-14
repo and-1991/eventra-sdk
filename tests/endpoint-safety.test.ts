@@ -31,7 +31,7 @@ describe("endpoint safety", () => {
     await sdk.flush();
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit;
+    const init = vi.mocked(fetchImpl).mock.calls[0]?.[1] as RequestInit;
     expect(init.redirect).toBe("error");
   });
 

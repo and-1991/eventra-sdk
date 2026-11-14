@@ -74,7 +74,7 @@ describe("track() validation", () => {
     sdk.track("\ud800");
     sdk.track("ok.event");
     await sdk.flush();
-    const names = calls.flatMap((c) => c.body.events.map((e: { name: string }) => e.name));
+    const names = calls.flatMap((c) => c.body.events.map((e) => String(e.name)));
     expect(names).toEqual(["ok.event"]);
   });
 
@@ -90,7 +90,7 @@ describe("track() validation", () => {
     sdk.track("App: User Sign Up");
     sdk.track("  Order Completed  ");
     await sdk.flush();
-    const names = calls.flatMap((c) => c.body.events.map((e: { name: string }) => e.name));
+    const names = calls.flatMap((c) => c.body.events.map((e) => String(e.name)));
     expect(names).toEqual(["App: User Sign Up", "Order Completed"]);
   });
 

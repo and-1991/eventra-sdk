@@ -28,7 +28,7 @@ describe("process exit handling (Node runtime, autoFlushOnExit default)", () => 
     expect(onceSpy).toHaveBeenCalledWith("SIGINT", expect.any(Function));
     expect(onceSpy).toHaveBeenCalledWith("SIGTERM", expect.any(Function));
 
-    const sigintHandler = onceSpy.mock.calls.find((c) => c[0] === "SIGINT")?.[1] as (
+    const sigintHandler = onceSpy.mock.calls.find((c) => (c[0] as string) === "SIGINT")?.[1] as (
       ...args: unknown[]
     ) => void;
     expect(sigintHandler).toBeTypeOf("function");
