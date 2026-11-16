@@ -1,7 +1,7 @@
 {
   "name": "@eventra_dev/eventra-sdk",
-  "version": "2.0.14",
-  "description": "Production-grade analytics SDK for feature usage and product behavior — batching, retries, circuit breaker, runtime-aware (browser, Node, Edge, serverless).",
+  "version": "2.1.0",
+  "description": "Production-grade analytics SDK for feature usage and product behavior - batching, retries, circuit breaker, runtime-aware (browser, Node, Edge, serverless).",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -32,6 +32,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:mutation": "stryker run",
     "test:e2e": "pnpm build && playwright test",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.test.json",
     "lint": "eslint src tests"
@@ -44,6 +45,8 @@
   "devDependencies": {
     "@eslint/js": "^9.18.0",
     "@playwright/test": "^1.62.0",
+    "@stryker-mutator/core": "9.6.1",
+    "@stryker-mutator/vitest-runner": "9.6.1",
     "@types/node": "^20.0.0",
     "@vitest/coverage-v8": "^4.1.7",
     "eslint": "^9.18.0",

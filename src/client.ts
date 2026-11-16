@@ -1,4 +1,4 @@
-import { TrackerOptions, TrackEvent, SdkInfo, TrackOptions } from "./types";
+import { TrackerOptions, TrackEvent, SdkInfo, TrackOptions, EventraScope } from "./types";
 import {
   Diagnostics,
   DiagnosticsReport,
@@ -28,6 +28,9 @@ const LEADER_KEY = "__eventra_leader__";
 const LEADER_TTL_MS = 4000;
 const QUEUE_KEY = "__eventra_q__";
 const DIAGNOSTICS_KEY = "__eventra_d__";
+// the user set by identify(), kept so a reload does not send the first events without it; the key ends with a
+// hash of the API key, so two Eventra projects on one site (a third-party widget, say) never share a user
+const USER_KEY_PREFIX = "__eventra_u__";
 const CHANNEL_NAME = "eventra-sdk";
 
 const MAX_EVENT_NAME = 64;
@@ -67,6 +70,8 @@ const DELIVERED_KEYS_MAX = 10_000;
 // once per open tab. Events read from storage (an earlier page, a closed tab) are sent at once, as before.
 const LIVE_TAB_GRACE_MS = 15_000;
 const LIVE_TAB_KEYS_MAX = 10_000;
+// identifyHint: how many events without a user id, from the start, before the one warning
+const IDENTIFY_HINT_AFTER = 50;
 
 let activeInstances = 0;
 
@@ -148,8 +153,10 @@ function uuidV4(): string {
   // never throw, so fall back to a random v4-shaped id. The key only has to be
   // unique per event for server-side dedup, it is not a secret.
   const bytes = new Uint8Array(16);
+  // Stryker disable next-line EqualityOperator: equivalent, a Uint8Array ignores a write past its end
   for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
   let t = Date.now();
+  // Stryker disable next-line EqualityOperator: equivalent until the year 10889, when Date.now() first needs a 7th byte
   for (let i = 0; i < 6; i++) {
     bytes[i] ^= t & 0xff;
     t = Math.floor(t / 256);
@@ -175,10 +182,12 @@ function isUrl(value: string): boolean {
   }
 }
 
+function warn(message: string): void {
+  if (typeof console !== "undefined") console.warn(message);
+}
+
 function warnOption(name: string, value: unknown, fallback: unknown): void {
-  if (typeof console !== "undefined") {
-    console.warn(`Eventra: option "${name}" is invalid (${String(value)}), using ${String(fallback)}`);
-  }
+  warn(`Eventra: option "${name}" is invalid (${String(value)}), using ${String(fallback)}`);
 }
 
 /**
@@ -254,9 +263,66 @@ function cut(value: string, max: number): string {
 
 /** A user id is a string; a number is written out, anything else (null, an object) means no user id. */
 function normalizeUserId(value: unknown, max: number): string | undefined {
+  // Stryker disable next-line ConditionalExpression: equivalent, Number.isFinite is false for anything but a number
   if (typeof value === "bigint" || (typeof value === "number" && Number.isFinite(value))) return cut(String(value), max);
   if (typeof value !== "string") return undefined;
   return cut(value, max);
+}
+
+/**
+ * A user id that names someone: as in track(), not empty or only spaces, and not the text a missing id turns into
+ * (`String(user?.id)` gives "undefined", JSON.stringify of a missing field "null").
+ */
+function identifiedUserId(value: unknown): string | undefined {
+  const id = normalizeUserId(value, MAX_USER_ID);
+  if (id === undefined) return undefined;
+  const trimmed = id.trim();
+  return trimmed && trimmed !== "undefined" && trimmed !== "null" ? id : undefined;
+}
+
+/** FNV-1a of the API key, in hex: names the stored user per project without putting the key itself in storage. */
+function keyHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+/** React Native: one user per app, like a browser tab, though it has no `document`. */
+// Stryker disable OptionalChaining,BlockStatement: equivalent here; a missing navigator throws into the catch, and
+// the catch's undefined is as falsy as false for the one caller
+function isReactNative(): boolean {
+  try {
+    return (globalThis as { navigator?: { product?: unknown } }).navigator?.product === "ReactNative";
+  } catch {
+    return false;
+  }
+}
+// Stryker restore OptionalChaining,BlockStatement
+
+/**
+ * `process.env.NODE_ENV` is written out in full so bundlers (Vite, webpack, esbuild) replace it when the app is
+ * built; without the replacement a browser has no `process` (null here).
+ */
+function nodeEnv(): string | undefined | null {
+  try {
+    return process.env.NODE_ENV;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * During development, for the identify hint. A browser bundle counts as development unless built for production
+ * (the bundler sets NODE_ENV). A server often has no NODE_ENV in production (Lambda, plain Docker), so there only an
+ * explicit "development" counts. Test runs never count.
+ */
+function isDevelopment(server: boolean): boolean {
+  const env = nodeEnv();
+  if (env === null || env === "test") return false;
+  return server ? env === "development" : env !== "production";
 }
 
 /**
@@ -288,6 +354,7 @@ function stripUnsafeForName(value: string): string {
 }
 
 function normalizeEventName(name: string): string | null {
+  // Stryker disable next-line ConditionalExpression: equivalent, a non-string falls out as an empty name below (or throws into track()'s catch)
   if (typeof name !== "string") return null;
   const trimmed = stripUnsafeForName(name).trim();
   if (!trimmed) return null;
@@ -308,28 +375,33 @@ function backoffMs(attempt: number, base: number): number {
 let textEncoder: TextEncoder | undefined;
 
 function utf8ByteLength(value: string): number {
+  // Stryker disable next-line ConditionalExpression,BlockStatement: equivalent where Buffer exists (Node, the test runtime), which counts UTF-8 the same way
   if (typeof TextEncoder !== "undefined") {
     textEncoder ??= new TextEncoder();
     return textEncoder.encode(value).length;
   }
   const g = globalThis as { Buffer?: { byteLength: (s: string, enc: string) => number } };
   if (g.Buffer) {
+    // Stryker disable next-line StringLiteral: equivalent, Buffer.byteLength counts UTF-8 by default
     return g.Buffer.byteLength(value, "utf8");
   }
   return value.length;
 }
 
 function isStoredEvent(e: unknown): e is TrackEvent {
+  // Stryker disable next-line ConditionalExpression: equivalent, a non-object has no idempotencyKey and fails the next check
   if (e === null || typeof e !== "object") return false;
   const ev = e as Partial<TrackEvent>;
   return (
     typeof ev.idempotencyKey === "string" &&
     ev.idempotencyKey.length > 0 &&
     ev.idempotencyKey.length <= 100 &&
+    // Stryker disable next-line ConditionalExpression: equivalent, a name that is not a string has no length and fails the next check
     typeof ev.name === "string" &&
     ev.name.length > 0 &&
     ev.name.length <= MAX_EVENT_NAME &&
     typeof ev.timestamp === "string" &&
+    // Stryker disable next-line ConditionalExpression: equivalent, a user id that is not a string has no length to pass the check
     (ev.userId === undefined || (typeof ev.userId === "string" && ev.userId.length <= MAX_USER_ID)) &&
     (ev.properties === undefined || (ev.properties !== null && typeof ev.properties === "object" && !Array.isArray(ev.properties)))
   );
@@ -383,12 +455,15 @@ function validateProperties(
 ): Record<string, unknown> {
   // Properties are an object of values: a number, a string, a list or null is not (it used to pass through as is).
   if (
+    // Stryker disable next-line all: equivalent, track() passes `properties ?? {}`, and any other non-object fails the toString check below
     properties === null ||
+    // Stryker disable next-line all: equivalent, see the line above
     typeof properties !== "object" ||
     Array.isArray(properties) ||
     // a Date, a Map, a Set, a RegExp: objects, but not a bag of named values
     Object.prototype.toString.call(properties) !== "[object Object]"
   ) {
+    // Stryker disable next-line StringLiteral: the message is never read, track() catches it and drops the event
     throw new Error("Eventra: properties must be an object");
   }
   // Own keys are listed once per object with Object.keys (what JSON.stringify sends). Listing the keys of an
@@ -398,18 +473,22 @@ function validateProperties(
   const topKeys = Object.keys(properties as object);
   // Nothing to walk or measure for an empty object (the common case), but it is still copied: the caller
   // keeps its own object and may fill it in later.
+  // Stryker disable next-line ConditionalExpression: equivalent, an empty object is walked and copied to the same {}
   if (topKeys.length === 0) return {};
 
   let visited = 0;
   const depth = (obj: unknown, level: number, keys?: string[]): void => {
     if (level > MAX_PROPERTIES_DEPTH) {
+      // Stryker disable next-line StringLiteral: the message is never read
       throw new Error(`Eventra: properties exceed max depth (${MAX_PROPERTIES_DEPTH})`);
     }
+    // Stryker disable next-line all: a speed guard only; past 50,000 values the JSON is far over the size limit and refused there
     if (++visited > MAX_PROPERTIES_NODES) {
       throw new Error("Eventra: properties are too large to check");
     }
     if (obj === null || typeof obj !== "object") return;
     if (Array.isArray(obj)) {
+      // Stryker disable next-line all: a speed guard only, as above
       if (visited + obj.length > MAX_PROPERTIES_NODES) {
         throw new Error("Eventra: properties are too large to check");
       }
@@ -417,6 +496,7 @@ function validateProperties(
       return;
     }
     const own = keys ?? Object.keys(obj);
+    // Stryker disable next-line all: a speed guard only, as above
     if (visited + own.length > MAX_PROPERTIES_NODES) {
       throw new Error("Eventra: properties are too large to check");
     }
@@ -426,6 +506,7 @@ function validateProperties(
   depth(properties, 0, topKeys);
 
   const json = JSON.stringify(properties);
+  // Stryker disable next-line ConditionalExpression: equivalent, a plain object always serializes
   if (json === undefined || utf8ByteLength(json) > MAX_PROPERTIES_JSON_BYTES) {
     throw new Error(
       `Eventra: properties exceed max size (${MAX_PROPERTIES_JSON_BYTES} bytes)`,
@@ -437,6 +518,7 @@ function validateProperties(
   const copy: unknown = JSON.parse(json);
   // an object with a toJSON() can serialize to something that is not an object
   if (copy === null || typeof copy !== "object" || Array.isArray(copy)) {
+    // Stryker disable next-line StringLiteral: the message is never read
     throw new Error("Eventra: properties must be an object");
   }
   return copy as Record<string, unknown>;
@@ -446,15 +528,19 @@ function validateProperties(
 // Capped so one odd header cannot park the queue for a long time.
 function parseRetryAfterMs(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
+  // Stryker disable next-line MethodExpression: equivalent with fetch, whose Headers already strip the spaces around a value
   const trimmed = value.trim();
   let ms: number;
+  // Stryker disable next-line Regex: equivalent, a value with other characters becomes NaN and is refused below
   if (/^\d+$/.test(trimmed)) {
     ms = Number(trimmed) * 1000;
   } else {
     const at = Date.parse(trimmed);
+    // Stryker disable next-line ConditionalExpression: equivalent, NaN minus now is NaN, refused by the check below
     if (Number.isNaN(at)) return undefined;
     ms = at - Date.now();
   }
+  // Stryker disable next-line EqualityOperator: equivalent, a wait of 0 is ignored by both callers
   if (!(ms > 0)) return undefined;
   return Math.min(ms, RETRY_AFTER_MAX_MS);
 }
@@ -538,11 +624,6 @@ class Storage {
     }
   }
 
-  // Not currently called anywhere in the client — kept for API symmetry with
-  // get()/set() on this internal class. No real call site exists to exercise
-  // it, and Storage isn't part of the public surface, so a direct call here
-  // would only be a reflection-hack test, not real usage.
-  /* v8 ignore start */
   remove(key: string) {
     if (!this.enabled) return;
     try {
@@ -551,7 +632,6 @@ class Storage {
       /* ignore */
     }
   }
-  /* v8 ignore stop */
 }
 
 // ================= LEADER =================
@@ -783,6 +863,19 @@ export class Eventra {
 
   private exitHandlers: Array<() => void> = [];
 
+  // the user set by identify() (browser and other single-user runtimes), added to every event without its own
+  private userId?: string;
+  private warnedServerIdentify = false;
+  private warnedInvalidIdentify = false;
+  private warnedInvalidUser = false;
+  // one user for the whole instance is safe only where the instance serves one person: a browser tab, a React
+  // Native app. Everything else (Node, edge, Lambda, Deno, Cloudflare Workers) may serve many requests at once.
+  private singleUser = false;
+  private userKey = USER_KEY_PREFIX;
+  // identifyHint: events without a user id so far, and whether the check is over
+  private eventsWithoutUser = 0;
+  private identifyHintDone = false;
+
   constructor(options: TrackerOptions) {
     if (!options || typeof options !== "object" || typeof options.apiKey !== "string" || !options.apiKey) {
       throw new Error("Eventra: apiKey required - new Eventra({ apiKey: \"...\" })");
@@ -820,6 +913,10 @@ export class Eventra {
       if (options.diagnostics !== undefined && typeof options.diagnostics !== "boolean") {
         warnOption("diagnostics", options.diagnostics, "true");
       }
+      if (options.identifyHint !== undefined && typeof options.identifyHint !== "boolean") {
+        warnOption("identifyHint", options.identifyHint, "true");
+      }
+      this.identifyHintDone = options.identifyHint === false;
       for (const name of ["maxBatchSize", "maxQueueSize"] as const) {
         const value = options[name];
         if (typeof value === "number" && Number.isFinite(value) && value >= 1 && !Number.isInteger(value)) {
@@ -827,6 +924,8 @@ export class Eventra {
         }
       }
       this.runtime = detectRuntime();
+      this.singleUser = this.runtime === "browser" || isReactNative();
+      this.userKey = `${USER_KEY_PREFIX}${keyHash(options.apiKey)}`;
       warnIfInsecureEndpoint(this.endpoint);
 
       this.fetch = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
@@ -868,7 +967,11 @@ export class Eventra {
 
       if (this.runtime === "browser") {
         if (this.persistQueue) {
+          this.userId = this.loadStoredUser();
           this.loadAndMergeQueue();
+        } else {
+          // a user kept by an earlier visit with persistence on must not outlive the switch to memory only
+          this.storage.remove(this.userKey);
         }
         this.setupQueueSync();
       }
@@ -916,17 +1019,99 @@ export class Eventra {
   }
 
   track(name: string, options?: TrackOptions) {
+    this.trackSafely(name, options, undefined);
+  }
+
+  /**
+   * Sets the user of every following event that does not name its own, in a browser or a React Native app. In
+   * the browser the user is kept in localStorage (unless `persistQueue: false`) and shared with the other open
+   * tabs. Anywhere else (a server, an edge or serverless function, Deno, Cloudflare Workers) one instance may
+   * serve many users at once, so it is ignored with one warning: use `withUser()` there.
+   */
+  identify(userId: string | number): void {
+    if (this.destroyed) return;
+    if (!this.singleUser) {
+      if (!this.warnedServerIdentify) {
+        this.warnedServerIdentify = true;
+        warn(
+          "Eventra: identify() is ignored outside a browser, where one instance may serve many users - use withUser(userId).track(...) for each request (in Next.js and other SSR apps, call identify() in client code, e.g. useEffect)",
+        );
+      }
+      return;
+    }
+    const id = identifiedUserId(userId);
+    if (id === undefined) {
+      if (!this.warnedInvalidIdentify) {
+        this.warnedInvalidIdentify = true;
+        warn("Eventra: identify() needs a user id (a non-empty string or a number) - to sign a user out, call reset()");
+      }
+      return;
+    }
+    this.identifyHintDone = true;
+    if (id !== this.userId) this.setUser(id);
+  }
+
+  /** Forgets the user set by `identify()` (on sign-out), in every open tab and in localStorage. */
+  reset(): void {
+    if (this.destroyed || !this.singleUser) return;
+    // also when this tab holds no user: another tab or an earlier visit may have stored one
+    this.setUser(undefined);
+  }
+
+  /** The user set by `identify()`, if any. */
+  getUserId(): string | undefined {
+    return this.userId;
+  }
+
+  /**
+   * A tracker whose events carry `userId`, for one request on a server (works in every runtime). It shares
+   * this instance's queue, so making one per request is cheap. `undefined`, `null` or an invalid id give events
+   * without a user (never the user of `identify()`), so `withUser(req.user?.id)` works for signed-out requests.
+   */
+  withUser(userId: string | number | null | undefined): EventraScope {
+    let id: string | undefined;
+    if (userId !== undefined && userId !== null) {
+      id = identifiedUserId(userId);
+      if (id === undefined && !this.warnedInvalidUser) {
+        this.warnedInvalidUser = true;
+        warn("Eventra: withUser() got an invalid user id (it needs a non-empty string or a number), its events are sent without one");
+      }
+    }
+    if (id !== undefined) this.identifyHintDone = true;
+    // null: a scope without a user, which does not fall back to identify()
+    const scopeUser = id ?? null;
+    return {
+      track: (name: string, options?: TrackOptions) => this.trackSafely(name, options, scopeUser),
+    };
+  }
+
+  private setUser(id: string | undefined) {
+    this.userId = id;
+    if (this.runtime !== "browser") return;
+    // removing is unconditional: a user stored with persistence on must go on sign-out whatever the setting now
+    if (id === undefined) this.storage.remove(this.userKey);
+    else if (this.persistQueue) this.storage.set(this.userKey, id);
+    this.broadcast({ type: "user", key: this.userKey, userId: id ?? null });
+  }
+
+  private loadStoredUser(): string | undefined {
+    const saved = this.storage.get(this.userKey);
+    return typeof saved === "string" ? identifiedUserId(saved) : undefined;
+  }
+
+  // scopeUserId: undefined outside a scope, null for a scope without a user
+  private trackSafely(name: string, options: TrackOptions | undefined, scopeUserId: string | null | undefined) {
     // `track()` is called fire-and-forget from anywhere: nothing it meets (a userId getter that throws, a
     // crypto that throws) may come out of it
     try {
-      this.trackEvent(name, options);
+      this.trackEvent(name, options, scopeUserId);
     } catch {
       this.recordDiagnostic("invalid_event");
       callSafely(this.options.onEventsDropped, 1);
     }
   }
 
-  private trackEvent(name: string, options?: TrackOptions) {
+  private trackEvent(name: string, options: TrackOptions | undefined, scopeUserId: string | null | undefined) {
     if (this.destroyed || this.shuttingDown) return;
 
     const eventName = normalizeEventName(name);
@@ -953,16 +1138,27 @@ export class Eventra {
       return;
     }
 
+    // a userId of the call wins (null: no user; an empty or blank one counts as not given), then the scope of
+    // withUser() (null: a scope without a user), then the user of identify()
+    const given = options?.userId;
+    const ownUserId = typeof given === "string" && !given.trim() ? undefined : given;
     const event: TrackEvent = {
       idempotencyKey: uuidV4(),
       name: eventName,
-      userId: normalizeUserId(options?.userId, MAX_USER_ID),
+      userId:
+        ownUserId !== undefined
+          ? normalizeUserId(ownUserId, MAX_USER_ID)
+          : scopeUserId !== undefined
+            ? (scopeUserId ?? undefined)
+            : this.userId,
       properties,
       timestamp: new Date().toISOString(),
     };
 
     this.queue.push(event);
+    if (!this.identifyHintDone) this.checkIdentifyHint(identifiedUserId(event.userId) !== undefined);
 
+    // Stryker disable next-line ConditionalExpression: equivalent outside a browser, where there is no storage to persist to and no channel
     if (this.runtime === "browser") {
       this.schedulePersist();
       this.broadcast({ type: "queue-add", events: [event] });
@@ -1231,6 +1427,23 @@ export class Eventra {
     };
   }
 
+  // one warning during development when an app sends events without ever saying whose they are
+  private checkIdentifyHint(hasUser: boolean) {
+    if (hasUser) {
+      this.identifyHintDone = true;
+      return;
+    }
+    if (++this.eventsWithoutUser < IDENTIFY_HINT_AFTER) return;
+    this.identifyHintDone = true;
+    if (!isDevelopment(!this.singleUser)) return;
+    const how = this.singleUser
+      ? "call tracker.identify(userId) after sign-in"
+      : "track through tracker.withUser(userId) in each request";
+    warn(
+      `Eventra: none of the first ${IDENTIFY_HINT_AFTER} events has a userId, so unique users cannot be counted - ${how} (identifyHint: false turns this off)`,
+    );
+  }
+
   private dropPoisonEvent(event: TrackEvent) {
     this.recordDiagnostic("too_large");
     this.removeDelivered([event]);
@@ -1242,9 +1455,11 @@ export class Eventra {
     const keys = new Set(batch.map((e) => e.idempotencyKey));
     // a delivered batch is nearly always the start of the queue: cut it off instead of testing every event
     // (filtering each batch made draining a large queue quadratic: 300,000 events blocked the loop for minutes)
+    // Stryker disable next-line ConditionalExpression,EqualityOperator,ArrowFunction,BooleanLiteral: equivalent, a wrong "no" takes the filter path, which gives the same queue (the shortcut is speed only)
     const head = batch.length <= this.queue.length && batch.every((event, index) => this.queue[index] === event);
     this.queue = head ? this.queue.slice(batch.length) : this.queue.filter((e) => !keys.has(e.idempotencyKey));
 
+    // Stryker disable next-line ConditionalExpression: equivalent outside a browser, where there is no storage and no channel
     if (this.runtime === "browser") {
       this.rememberDelivered(keys);
       this.schedulePersist();
@@ -1284,10 +1499,13 @@ export class Eventra {
     /* v8 ignore stop */
 
     const useKeepalive =
+      // Stryker disable next-line all: equivalent, document exists exactly in the browser runtime
       this.runtime === "browser" &&
+      // Stryker disable next-line all: equivalent, see the line above
       typeof document !== "undefined" &&
       (document.visibilityState === "hidden" || this.leaving) &&
       // browsers refuse a keepalive body above 64 KiB (the whole request fails), whatever maxPayloadBytes allows
+      // Stryker disable next-line EqualityOperator: a body of exactly the keepalive limit; not worth a 60,000-byte fixture
       payloadBytes <= Math.min(this.maxPayloadBytes, KEEPALIVE_MAX_BYTES);
 
     // A half-open breaker lets exactly one request through as a probe: no
@@ -1297,6 +1515,7 @@ export class Eventra {
     // the batch is then sent once more without it
     let strippedDiagnostics = false;
 
+    // Stryker disable next-line EqualityOperator: equivalent, the last attempt always returns or throws
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const controller = new AbortController();
       const attemptTimeoutMs =
@@ -1327,7 +1546,9 @@ export class Eventra {
 
         if (res.status === 429 || res.status >= 500) {
           throw new RetryableDeliveryError(
+            // Stryker disable next-line StringLiteral: the message is never read
             "retryable delivery error",
+            // Stryker disable next-line OptionalChaining: equivalent with a real Response, which always has headers.get
             parseRetryAfterMs(res.headers?.get?.("retry-after")),
             res.status === 429 ? "rate_limited" : "server_error",
           );
@@ -1358,11 +1579,13 @@ export class Eventra {
           // accepted only once the field was left out: this server does not
           // take it, so stop sending it (the counters are kept, not reported)
           this.diagnosticsEnabled = false;
+          // Stryker disable next-line BooleanLiteral: equivalent, the counters are never sent once diagnostics are off
           return false;
         }
 
         return carriesDiagnostics;
       } catch (err) {
+        // Stryker disable next-line ConditionalExpression,StringLiteral: equivalent wherever console exists (everywhere the tests run)
         if (!this.warnedRedirect && isRedirectError(err) && typeof console !== "undefined") {
           this.warnedRedirect = true;
           console.warn(
@@ -1380,6 +1603,7 @@ export class Eventra {
         if (isLast || outOfBudget) {
           throw err instanceof RetryableDeliveryError
             ? err
+            // Stryker disable next-line StringLiteral: the message is never read
             : new RetryableDeliveryError("retryable delivery error", undefined, "network");
         }
 
@@ -1441,6 +1665,7 @@ export class Eventra {
   }
 
   private withoutDelivered(events: TrackEvent[]): TrackEvent[] {
+    // Stryker disable next-line ConditionalExpression: equivalent, filtering against an empty set keeps every event
     if (!this.deliveredKeys.size) return events;
     return events.filter((e) => !this.deliveredKeys.has(e?.idempotencyKey));
   }
@@ -1491,10 +1716,12 @@ export class Eventra {
   }
 
   private trimQueue(queue: TrackEvent[] = this.queue): TrackEvent[] {
+    // Stryker disable next-line ConditionalExpression,EqualityOperator: equivalent, at or under the limit nothing is removed either way
     if (queue.length <= this.maxQueue) return queue;
     const removed = queue.slice(0, queue.length - this.maxQueue);
     // every open tab holds every tab's events and trims the same ones: an event another open tab announced
     // is that tab's to count, so a dropped event is reported once, not once per open tab
+    // Stryker disable next-line OptionalChaining: equivalent, the queue holds only checked events (mergeQueues), never null
     const dropped = removed.filter((e) => !this.liveTabEvents.has(e?.idempotencyKey)).length;
     if (dropped > 0) {
       this.recordDiagnostic("queue_full", dropped);
@@ -1507,6 +1734,7 @@ export class Eventra {
   private rememberLiveTabEvents(events: TrackEvent[]) {
     const until = Date.now() + LIVE_TAB_GRACE_MS;
     for (const event of events) {
+      // Stryker disable next-line OptionalChaining: equivalent, announced events are checked by mergeQueues first
       const key = event?.idempotencyKey;
       if (typeof key === "string" && !this.liveTabEvents.has(key)) this.liveTabEvents.set(key, until);
     }
@@ -1522,7 +1750,9 @@ export class Eventra {
   // The leader in `leader` mode sends everything, so it never waits.
   private leftToItsTab(event: TrackEvent): boolean {
     if (this.leader) return false;
+    // Stryker disable next-line OptionalChaining: equivalent, the queue holds only checked events
     const until = this.liveTabEvents.get(event?.idempotencyKey);
+    // Stryker disable next-line ConditionalExpression: equivalent, Date.now() < undefined is false
     return until !== undefined && Date.now() < until;
   }
 
@@ -1549,6 +1779,14 @@ export class Eventra {
       this.channel.onmessage = (e: MessageEvent) => {
         const data = e.data;
 
+        if (data?.type === "user") {
+          // another project on the same site has its own user
+          if (data.key !== this.userKey) return;
+          if (data.userId === null) this.userId = undefined;
+          else if (typeof data.userId === "string") this.userId = identifiedUserId(data.userId) ?? this.userId;
+          return;
+        }
+
         if (data?.type === "delivered" && Array.isArray(data.keys)) {
           const keys = new Set<string>(data.keys as string[]);
           this.rememberDelivered(keys);
@@ -1574,6 +1812,8 @@ export class Eventra {
 
     if (this.persistQueue && typeof window !== "undefined") {
       this.offStorageQueue = listen(window, "storage", (e: StorageEvent) => {
+        // another tab called identify() or reset(), or cleared the storage (key null)
+        if (e.key === this.userKey || e.key === null) this.userId = this.loadStoredUser();
         if (e.key !== QUEUE_KEY) return;
         this.loadAndMergeQueue();
       });

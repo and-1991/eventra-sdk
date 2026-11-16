@@ -1,7 +1,16 @@
 export interface TrackOptions {
-  /** A string; a number is written out as text. Cut to 120 characters. */
-  userId?: string | number;
+  /**
+   * A string; a number is written out as text. Cut to 120 characters. Takes priority over the user of
+   * `withUser()` and `identify()`; `null` sends the event without a user even when one is identified, and an
+   * empty or blank string counts as not given.
+   */
+  userId?: string | number | null;
   properties?: Record<string, unknown>;
+}
+
+/** A tracker bound to one user, returned by `withUser()`. Shares the queue and delivery of its `Eventra`. */
+export interface EventraScope {
+  track(name: string, options?: TrackOptions): void;
 }
 
 export interface TrackerOptions {
@@ -64,6 +73,13 @@ export interface TrackerOptions {
     status: number;
     events: TrackEvent[];
   }) => void;
+
+  /**
+   * Warn once when none of the first 50 events carries a user id (default `true`): in a browser bundle not
+   * built for production, on a server only with `NODE_ENV=development`, never in test runs. Set `false` for an
+   * app that has no signed-in users.
+   */
+  identifyHint?: boolean;
 
   /** Multi-tab mode (browser only) */
   multiTabMode?: "independent" | "leader";

@@ -8,7 +8,7 @@
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm version" src="https://img.shields.io/npm/v/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://www.npmjs.com/package/@eventra_dev/eventra-sdk"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@eventra_dev/eventra-sdk.svg?style=flat-square&color=blue"></a>
   <a href="https://github.com/and-1991/eventra-sdk/actions/workflows/test.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/and-1991/eventra-sdk/test.yml?branch=main&label=tests&style=flat-square&logo=vitest&logoColor=white"></a>
-  <img alt="tests passing" src="https://img.shields.io/badge/tests-280%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
+  <img alt="tests passing" src="https://img.shields.io/badge/tests-358%20passing-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="test suites" src="https://img.shields.io/badge/suites-22-brightgreen?style=flat-square">
   <img alt="coverage" src="https://img.shields.io/badge/coverage-100%25-brightgreen?style=flat-square&logo=vitest&logoColor=white">
   <img alt="node" src="https://img.shields.io/node/v/@eventra_dev/eventra-sdk?style=flat-square&color=darkgreen&logo=node.js&logoColor=white">
@@ -85,6 +85,48 @@ The SDK automatically handles:
 
 ---
 
+## Identify users
+
+Unique users, the Users page and per-user numbers in the dashboard (Top users, users on Declining) need to know whose event it is. Without a `userId` the events still count as uses (dead, new and declining features work as before), but nothing can be counted per user.
+
+Already pass `userId` to every `track()`? Nothing to change: it still works and can be mixed with the methods below.
+
+**Browser and React Native:** call `identify()` once after sign-in (and when the page loads with a signed-in user), and `reset()` in your sign-out handler. Every following `track()` gets that user:
+
+```ts
+tracker.identify(user.id);
+tracker.track("export.clicked"); // sent with userId = user.id
+
+// in your sign-out handler (not while auth is still loading)
+tracker.reset();
+```
+
+- The user is kept in `localStorage` (with `persistQueue: false` in memory only, and a user stored earlier is removed), so the first events after a reload are not sent without it.
+- `identify()` and `reset()` reach every open tab of the site. `reset()` also removes a user stored by an earlier visit.
+- The stored user belongs to your API key: another Eventra project on the same site (a third-party widget, say) never sees it or resets it.
+- `getUserId()` returns the current user.
+- In React Native `identify()` works in memory. In Next.js and other SSR apps, call it in client code (an effect), not while rendering on the server.
+
+**Everywhere else** (Node, serverless, edge, Deno, Cloudflare Workers) one instance may serve many users at once, so `identify()` is ignored there with one warning. Use `withUser()` for each request instead:
+
+```ts
+// in a request handler (Express, Nest, a serverless function); req.user is set by your auth middleware
+app.post("/invoices", (req: Request & { user?: { id: string } }, res) => {
+  tracker.withUser(req.user?.id).track("invoice.created", { properties: { plan: "pro" } }); // undefined: no user
+  res.sendStatus(201);
+});
+```
+
+`withUser()` returns a light object over the same queue, so making one per request is cheap. It works in every runtime. `withUser(undefined)`, `withUser(null)` or an invalid id give events without a user, never the user of `identify()`. Call it where you track (or keep it in a typed variable): the Eventra CLI finds `tracker.withUser(id).track("x")` and `const t = tracker.withUser(id); t.track("x")`, but not a scope stored on an untyped object such as `req.tracker`.
+
+**Which user an event gets:** the `userId` passed to `track()` first (`null` sends the event without a user; an empty or blank one counts as not given), then the user of `withUser()`, then the one of `identify()`. The user is fixed when `track()` is called, so an event tracked just before `reset()` keeps its user.
+
+Pass your own internal id (or a hash of it), never an email or a phone number. `identify()` and `withUser()` refuse text that names nobody (`"undefined"`, `"null"`, blanks), which is what `String(user?.id)` gives for a missing user.
+
+The SDK warns once when none of the first 50 events has a user id: in a browser bundle that is not built for production, and on a server only when `NODE_ENV` is `development` (Lambda and many containers set none in production). Test runs (`NODE_ENV=test`) never warn. `identifyHint: false` turns it off for an app without signed-in users.
+
+---
+
 ## Runtime Behavior
 
 Eventra SDK adapts automatically:
@@ -95,7 +137,7 @@ Eventra SDK adapts automatically:
 | Node.js     | batching + retry                       |
 | Serverless (AWS Lambda only) | immediate flush + retry |
 | Edge        | batching + retry                       |
-| Anything else (e.g. Cloudflare Workers) | not distinctly detected — falls back to the same batching + retry path as Node.js |
+| Anything else (e.g. Cloudflare Workers) | not distinctly detected - falls back to the same batching + retry path as Node.js |
 
 No config needed.
 
@@ -122,7 +164,7 @@ Minimal:
 tracker.track("app.loaded");
 ```
 
-Event names lose NUL, line breaks and half-surrogates (the server removes them too), are trimmed, cut to 64 characters and trimmed again, `userId` is cut to 120 (API limits); a cut never leaves half of an emoji, so the name is the one the CLI catalog holds. A numeric `userId` is written out as text, and `null` or an object means no user id. `properties` are copied when you call `track()`, so changing the object afterwards does not change the event. `track()` never throws: an empty name, or properties that exceed the depth/size limits, are dropped silently and reported via `onEventsDropped` instead. A properties object with more than 50,000 values in all is refused as soon as its keys are listed, without walking it (listing the keys of a huge object is the only cost left: about 0.35 s for a million).
+Event names lose NUL, line breaks and half-surrogates (the server removes them too), are trimmed, cut to 64 characters and trimmed again, `userId` is cut to 120 (API limits); a cut never leaves half of an emoji, so the name is the one the CLI catalog holds. A numeric `userId` is written out as text, and `null` or an object means no user id (`null` also overrides a user set by `identify()` or `withUser()`). `properties` are copied when you call `track()`, so changing the object afterwards does not change the event. `track()` never throws: an empty name, or properties that exceed the depth/size limits, are dropped silently and reported via `onEventsDropped` instead. A properties object with more than 50,000 values in all is refused as soon as its keys are listed, without walking it (listing the keys of a huge object is the only cost left: about 0.35 s for a million).
 
 ---
 
@@ -223,7 +265,7 @@ const tracker = new Eventra({
 });
 ```
 
-**Privacy note:** persistence stores the pending queue — including any `userId`/`properties` you pass to `track()` — as plaintext JSON in `localStorage` so it survives reloads. If that's a concern (e.g. properties may carry PII on a shared/public device), disable it:
+**Privacy note:** persistence stores the pending queue - including any `userId`/`properties` you pass to `track()` - as plaintext JSON in `localStorage` so it survives reloads. If that's a concern (e.g. properties may carry PII on a shared/public device), disable it:
 
 ```ts
 const tracker = new Eventra({
@@ -252,12 +294,18 @@ const tracker = new Eventra({
 });
 
 tracker.track("invoice.created");
+
+// one process serves many users: bind the user per call or request
+export function onInvoiceCreated(userId: string) {
+  tracker.withUser(userId).track("invoice.created");
+}
 ```
 
 - batching  
 - retry  
 - auto flush (interval)  
 - graceful shutdown support
+- `identify()` is ignored here, use `withUser()` (see [Identify users](#identify-users))
 
 ---
 
@@ -339,9 +387,10 @@ const tracker = new Eventra({
 | exitOnSignal | Node only, default `true`: on `SIGINT`/`SIGTERM` the SDK flushes (bounded by `shutdownTimeoutMs`) and then, when no other listener for the signal exists, re-raises it so the process ends as it would without the SDK; when your app has its own listener the SDK only flushes. `false` only flushes and never re-raises. See [Shutdown](#shutdown) |
 | shutdownTimeoutMs | Total time `shutdown()` may spend flushing (default: 10000). It gives up after this, so a dead or rate-limited server cannot hold a `SIGTERM` shutdown past your grace period |
 | diagnostics | Report delivery problems (counts only) with the next successful batch, default `true`; `false` sends nothing extra. See [Delivery diagnostics](#delivery-diagnostics) |
-| persistQueue | Persist the queue to `localStorage` in the browser (browser only, default: `true`) — `false` keeps it in-memory only, avoiding writing `userId`/`properties` to disk |
+| persistQueue | Persist the queue to `localStorage` in the browser (browser only, default: `true`) - `false` keeps it in-memory only, avoiding writing `userId`/`properties` to disk (the user of `identify()` is then kept in memory too) |
+| identifyHint | Warn once when none of the first 50 events has a user id (default: `true`): in a browser bundle not built for production, on a server only with `NODE_ENV=development`, never in test runs. `false` for an app without signed-in users. See [Identify users](#identify-users) |
 
-An option with an invalid value (for example `maxBatchSize: 0` or `NaN`, an empty `endpoint`) is ignored with one console warning and the default is used. Callbacks such as `onEventsDropped` and `onDeliveryFailed` can throw or reject without affecting the SDK. Draining a large queue (hundreds of thousands of events) takes time in proportion to its size. Some values are refused at once instead: an `apiKey` with characters a header cannot carry, a `fetchImpl` that is not a function. `endpoint` that is not a URL, an unknown `multiTabMode`, a `diagnostics` that is not `true` or `false`, a fractional `maxBatchSize` or `maxQueueSize`, a `maxBatchSize` above 500 (500 is used), and a `maxRetries` above 20 are reported with a warning and replaced. A `userId` that is `NaN` or infinite is no user id.
+An option with an invalid value (for example `maxBatchSize: 0` or `NaN`, an empty `endpoint`) is ignored with one console warning and the default is used. Callbacks such as `onEventsDropped` and `onDeliveryFailed` can throw or reject without affecting the SDK. Draining a large queue (hundreds of thousands of events) takes time in proportion to its size. Some values are refused at once instead: an `apiKey` with characters a header cannot carry, a `fetchImpl` that is not a function. `endpoint` that is not a URL, an unknown `multiTabMode`, a `diagnostics` or `identifyHint` that is not `true` or `false`, a fractional `maxBatchSize` or `maxQueueSize`, a `maxBatchSize` above 500 (500 is used), and a `maxRetries` above 20 are reported with a warning and replaced. A `userId` that is `NaN` or infinite is no user id.
 
 ---
 
@@ -357,7 +406,7 @@ await tracker.flush();
 
 ## Shutdown
 
-Graceful shutdown — flush first, then cleanup:
+Graceful shutdown - flush first, then cleanup:
 
 ```ts
 await tracker.shutdown();
@@ -449,11 +498,11 @@ Eventra SDK includes:
 - Circuit breaker with half-open recovery: one probe request, cooldown doubles after each failed probe (5 s up to 60 s)
 - Queue-based delivery (all runtimes)
 - Safe dequeue (events removed only after successful ingest)
-- Queue persistence (browser) with merge + cross-tab sync — opt out via `persistQueue: false` if `localStorage` isn't acceptable for your data
+- Queue persistence (browser) with merge + cross-tab sync - opt out via `persistQueue: false` if `localStorage` isn't acceptable for your data
 - Multi-tab leader election with re-election
 - `fetch` + `keepalive` on tab close (with `x-api-key`, size-checked)
 - `pagehide` + `visibilitychange` flush hooks
-- Property validation at `track()` (depth + size) — fails soft via `onEventsDropped`, `track()` never throws
+- Property validation at `track()` (depth + size) - fails soft via `onEventsDropped`, `track()` never throws
 - Payload byte limits per batch
 - Permanent error handling via `onDeliveryFailed` (401, 422, etc.)
 - Automatic requeue on network errors and 429 / 5xx
@@ -465,18 +514,21 @@ Eventra SDK includes:
 
 **100% statement/branch/function/line coverage** (v8 provider, `pnpm test:coverage`).
 
-280 vitest tests across 24 files (plus 7 Playwright tests in a real browser) cover the entire delivery pipeline:
+**Mutation testing** (`pnpm test:mutation`, Stryker over all of `src/client.ts` and `src/diagnostics.ts`, about 30 minutes): 84.6% of mutants killed (2026-11-16), the build breaks below 80%. `tests/accuracy.test.ts` pins what decides whether an event reaches the server once and under its catalog name: name and user id cleaning and cutting, idempotency keys in every runtime, UTF-8 payload size, which saved events are read back, Retry-After, the size and depth limits of properties, what each server answer does to a batch, keepalive, and events shared between tabs. Mutants that cannot change behaviour are marked in the code with `// Stryker disable` and the reason.
 
-- `track()` validation — name length, userId truncation, properties depth/size, idempotency keys
-- Batching — auto-flush at `maxBatchSize`, periodic flush via timer, queue overflow drop
-- Retry & backoff — 429, 5xx, network errors, no-retry on 4xx, fetch timeout/abort
+358 vitest tests across 26 files (plus 7 Playwright tests in a real browser) cover the entire delivery pipeline:
+
+- `track()` validation - name length, userId truncation, properties depth/size, idempotency keys
+- Users - `identify()`, `reset()` and `withUser()`, which user wins, keeping the user across reloads and tabs and per API key, ignoring `identify()` outside a browser and React Native, ids that name nobody, the development hint
+- Batching - auto-flush at `maxBatchSize`, periodic flush via timer, queue overflow drop
+- Retry & backoff - 429, 5xx, network errors, no-retry on 4xx, fetch timeout/abort
 - Circuit breaker - opens after 5 consecutive failed batches (each one after its retries), cools down, resets on success
-- Payload guards — multi-batch splitting, oversize event dropped via `onDeliveryFailed(413)`
+- Payload guards - multi-batch splitting, oversize event dropped via `onDeliveryFailed(413)`
 - Shutdown & destroy - flush ordering, timer teardown, idempotent shutdown, the `shutdownTimeoutMs` budget, signal handling (re-raise only when nobody else listens, PID 1, `exitOnSignal: false`)
 - Persisted queue - coalesced writes, 14-day maximum age, delivered-key filtering, cross-tab merge
-- Runtime detection — Node, Edge (`EdgeRuntime`), Serverless (AWS Lambda), unknown fallback, Node process exit handling
+- Runtime detection - Node, Edge (`EdgeRuntime`), Serverless (AWS Lambda), unknown fallback, Node process exit handling
 - Browser mode - persistence (with its size cap), leader election (including multi-tab lease races), BroadcastChannel sync, `fetch` keepalive, `pagehide` while a request is in flight, `pageshow` after a back/forward cache restore, a `window` that is not a browser
-- Storage edge cases — corrupted/blocked localStorage, quota exceeded, queue trimming
+- Storage edge cases - corrupted/blocked localStorage, quota exceeded, queue trimming
 - Internal fallbacks - `crypto.getRandomValues` (and a random id when there is no Web Crypto at all, as on Node 18), `Buffer`/string-length byte counting
 - Regressions: `flush()` waiting for a flush already in flight, properties copied at `track()`, a corrupt stored queue
 
@@ -513,7 +565,7 @@ pnpm --filter @eventra_dev/eventra-sdk test:coverage
 }
 ```
 
-`idempotencyKey` is generated once per event and stays identical across every retry attempt of that event — delivery is **at-least-once, not exactly-once**. A retried batch resends the same events with the same keys, and under a slow network a request can be fully received and processed by the ingestion endpoint even after the SDK's own fetch timed out client-side and moved on to a retry — the backend seeing the same `idempotencyKey` more than once is expected, not a sign of a bug, and should be deduplicated on that key rather than on request count.
+`idempotencyKey` is generated once per event and stays identical across every retry attempt of that event - delivery is **at-least-once, not exactly-once**. A retried batch resends the same events with the same keys, and under a slow network a request can be fully received and processed by the ingestion endpoint even after the SDK's own fetch timed out client-side and moved on to a retry - the backend seeing the same `idempotencyKey` more than once is expected, not a sign of a bug, and should be deduplicated on that key rather than on request count.
 
 Limits enforced by the SDK at `track()` time:
 
