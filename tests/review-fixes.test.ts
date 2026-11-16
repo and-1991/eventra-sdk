@@ -15,7 +15,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const QUEUE_KEY = "__eventra_q__";
+const QUEUE_KEY = "__eventra_q__ee0c38ea";
 const DAY = 24 * 60 * 60 * 1000;
 
 function make(

@@ -103,7 +103,7 @@ tracker.reset();
 
 - The user is kept in `localStorage` (with `persistQueue: false` in memory only, and a user stored earlier is removed), so the first events after a reload are not sent without it.
 - `identify()` and `reset()` reach every open tab of the site. `reset()` also removes a user stored by an earlier visit.
-- The stored user belongs to your API key: another Eventra project on the same site (a third-party widget, say) never sees it or resets it.
+- The stored user belongs to your API key: another Eventra project on the same site (a third-party widget, say) never sees it or resets it. The same holds for the pending events (see [Browser](#browser)).
 - `getUserId()` returns the current user.
 - In React Native `identify()` works in memory. In Next.js and other SSR apps, call it in client code (an effect), not while rendering on the server.
 
@@ -247,14 +247,24 @@ const tracker = new Eventra({
 });
 
 tracker.track("page.viewed");
+
+// after sign-in (and on load when the user is already signed in)
+tracker.identify(user.id);
+// in your sign-out handler
+tracker.reset();
 ```
 
 - batching  
 - retry  
-- persistence (localStorage)  
+- persistence (localStorage)
+- one user for every following event, kept across reloads and tabs (see [Identify users](#identify-users))  
 - flush on tab close (`fetch` with `keepalive`)
 
 By default (`multiTabMode: "independent"`) every open tab shares its pending events with the others, so the events of a tab that closes are not lost. An event another open tab just announced is left to that tab for 15 seconds (it sends within its flush interval and tells the others); only after that does another tab send it, for example when the first tab was closed. Events read back from storage (an earlier page, a closed tab) are sent at once. An event keeps the same idempotency key in every tab, so it is counted once even if two tabs send it. Use `"leader"` to have one tab send for all of them.
+
+The pending events, the tabs that share them and the leader tab belong to your API key: when a site runs two Eventra projects (your app and a third-party widget, say), neither ever sees or sends the other's events. A queue left by SDK 2.1.0 or older, which was shared by every key, is taken once by the first tracker that loads.
+
+`await tracker.flush()` also removes what it delivered from `localStorage` before it resolves, so a tracker created right after it does not send those events again.
 
 Optional - single sender across tabs:
 
@@ -319,7 +329,8 @@ const tracker = new Eventra({
 });
 
 export default async function handler(req, res) {
-  tracker.track("function.called");
+  // one instance serves many users: bind the user of this request
+  tracker.withUser(req.user?.id).track("function.called");
 
   await tracker.flush();
 
@@ -330,6 +341,7 @@ export default async function handler(req, res) {
 - AWS Lambda is detected automatically and flushes right away; on Vercel and other platforms the SDK batches on a timer, so always `await tracker.flush()` before the response ends
 - retry
 - optimized for short-lived environments
+- `identify()` is ignored here, use `withUser()` (see [Identify users](#identify-users))
 
 ---
 

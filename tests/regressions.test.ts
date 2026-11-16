@@ -15,7 +15,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const QUEUE_KEY = "__eventra_q__";
+const QUEUE_KEY = "__eventra_q__ee0c38ea";
 
 function make(
   fetchImpl: typeof fetch,
@@ -144,7 +144,7 @@ describe("browser queue persistence (coalesced)", () => {
     const sdk = make(fetchImpl);
     const Channel = (globalThis as { BroadcastChannel: typeof BroadcastChannel })
       .BroadcastChannel;
-    const sibling = new Channel("eventra-sdk");
+    const sibling = new Channel("eventra-sdk:ee0c38ea");
     const event = {
       idempotencyKey: "33333333-3333-4333-8333-333333333333",
       name: "remote",

@@ -3,7 +3,7 @@ import { Eventra } from "../src";
 import { createMockFetch } from "./helpers/mockFetch";
 import { installBrowserEnv, type BrowserEnvHandle } from "./helpers/browserEnv";
 
-const LEADER_KEY = "__eventra_leader__";
+const LEADER_KEY = "__eventra_leader__ee0c38ea";
 
 let env: BrowserEnvHandle;
 let active: Eventra[] = [];

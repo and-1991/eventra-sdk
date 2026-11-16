@@ -320,7 +320,7 @@ describe("diagnostics in the browser", () => {
     await sdk1.flush(); // fails: counter recorded
     sdk1.destroy(); // pagehide equivalent: counters written to localStorage
 
-    expect(env!.storage.getItem("__eventra_d__")).not.toBeNull();
+    expect(env!.storage.getItem("__eventra_d__ee0c38ea")).not.toBeNull();
 
     const second = scripted([200, 200]);
     const sdk2 = make(second.fetchImpl);
@@ -332,33 +332,44 @@ describe("diagnostics in the browser", () => {
     await sdk2.flush();
     expect(second.calls[1].diagnostics).toBeUndefined();
 
-    const stored = JSON.parse(env!.storage.getItem("__eventra_d__")!);
+    const stored = JSON.parse(env!.storage.getItem("__eventra_d__ee0c38ea")!);
     expect(stored.pending).toBeUndefined();
     expect(stored.counts.dropped + stored.counts.failed).toBe(0);
   });
 
+  // a send started by the timer: flush() itself writes at once (see the next tests)
   it("writes the counters on the same debounce as the queue", async () => {
     vi.useFakeTimers();
     const { fetchImpl } = scripted(["network"]);
-    const sdk = make(fetchImpl);
+    const sdk = make(fetchImpl, { disableTimer: false, flushInterval: 1000 });
     sdk.track("a");
-    await sdk.flush();
-    expect(env!.storage.getItem("__eventra_d__")).toBeNull();
+    await vi.advanceTimersByTimeAsync(1000); // the timer's send fails
+    expect(env!.storage.getItem("__eventra_d__ee0c38ea")).toBeNull();
     await vi.advanceTimersByTimeAsync(60);
-    const stored = JSON.parse(env!.storage.getItem("__eventra_d__")!);
+    const stored = JSON.parse(env!.storage.getItem("__eventra_d__ee0c38ea")!);
     expect(stored.counts.failed).toBe(1);
   });
 
   it("schedules its own write when the queue has nothing to write", async () => {
     vi.useFakeTimers();
     const { fetchImpl } = scripted(["network", "network"]);
-    const sdk = make(fetchImpl);
+    const sdk = make(fetchImpl, { disableTimer: false, flushInterval: 1000 });
     sdk.track("a");
     await vi.advanceTimersByTimeAsync(60); // the queue is written, no timer left
-    await sdk.flush(); // fails: only a counter changes
-    expect(env!.storage.getItem("__eventra_d__")).toBeNull();
+    await vi.advanceTimersByTimeAsync(940); // the timer's send fails: only a counter changes
+    expect(env!.storage.getItem("__eventra_d__ee0c38ea")).toBeNull();
     await vi.advanceTimersByTimeAsync(60);
-    const stored = JSON.parse(env!.storage.getItem("__eventra_d__")!);
+    const stored = JSON.parse(env!.storage.getItem("__eventra_d__ee0c38ea")!);
+    expect(stored.counts.failed).toBe(1);
+  });
+
+  it("writes the counters before flush() resolves", async () => {
+    vi.useFakeTimers();
+    const { fetchImpl } = scripted(["network"]);
+    const sdk = make(fetchImpl);
+    sdk.track("a");
+    await sdk.flush();
+    const stored = JSON.parse(env!.storage.getItem("__eventra_d__ee0c38ea")!);
     expect(stored.counts.failed).toBe(1);
   });
 
@@ -390,7 +401,7 @@ describe("diagnostics in the browser", () => {
     sdk.track("a");
     await sdk.flush();
     sdk.destroy();
-    expect(env!.storage.getItem("__eventra_d__")).toBeNull();
+    expect(env!.storage.getItem("__eventra_d__ee0c38ea")).toBeNull();
 
     const sdk2 = make(scripted([200]).fetchImpl, { persistQueue: false });
     await sdk2.flush();

@@ -242,7 +242,7 @@ describe("in a browser", () => {
     } finally {
       spy.mockRestore();
     }
-    expect(env.storage.getItem("__eventra_leader__")).toBeNull();
+    expect(env.storage.getItem("__eventra_leader__6a82cc93")).toBeNull();
   });
 
   it("leader mode survives a localStorage that throws on access (a sandboxed iframe)", async () => {
@@ -265,7 +265,7 @@ describe("in a browser", () => {
   it("a stored event that is missing its timestamp, has a long name, or a user id that is not text is not forwarded", async () => {
     const good = { idempotencyKey: "44444444-4444-4444-8444-444444444444", name: "good", properties: {}, timestamp: new Date().toISOString() };
     env.storage.setItem(
-      "__eventra_q__",
+      "__eventra_q__6a82cc93",
       JSON.stringify([
         good,
         { ...good, idempotencyKey: "a1", timestamp: undefined },
@@ -437,7 +437,7 @@ describe("more behavior in a browser", () => {
   it("a broadcast event with a time nobody can read is merged with a valid time", async () => {
     const { sdk, calls } = make({});
     const Channel = (globalThis as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel;
-    new Channel("eventra-sdk").postMessage({ type: "queue-add", events: [{ idempotencyKey: "bc1", name: "remote", properties: {}, timestamp: "notadate" }] });
+    new Channel("eventra-sdk:6a82cc93").postMessage({ type: "queue-add", events: [{ idempotencyKey: "bc1", name: "remote", properties: {}, timestamp: "notadate" }] });
     // the other tab had its 15 s to send it (S10): now this one does
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + 16_000);
     await sdk.flush();

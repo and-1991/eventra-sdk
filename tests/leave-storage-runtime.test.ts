@@ -15,7 +15,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const QUEUE_KEY = "__eventra_q__";
+const QUEUE_KEY = "__eventra_q__ee0c38ea";
 
 type Sent = { keepalive: boolean; names: string[]; bytes: number };
 
@@ -98,7 +98,7 @@ describe("leaving the page while a request is in flight", () => {
     const { fetchImpl, sent } = hangingFetch();
     const sdk = make(fetchImpl, { maxBatchSize: 1, maxPayloadBytes: 200_000 });
     const Channel = (globalThis as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel;
-    const other = new Channel("eventra-sdk");
+    const other = new Channel("eventra-sdk:ee0c38ea");
     const at = new Date().toISOString();
     // larger than a keepalive request may be, but within maxPayloadBytes: it goes out as a normal request
     other.postMessage({ type: "queue-add", events: [{ idempotencyKey: "big", name: "big", properties: { f: "z".repeat(70_000) }, timestamp: at }] });
@@ -197,7 +197,7 @@ describe("the queue in localStorage is capped by size", () => {
     const { fetchImpl } = createMockFetch({ responses: [200] });
     const sdk = make(fetchImpl);
     const Channel = (globalThis as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel;
-    const other = new Channel("eventra-sdk");
+    const other = new Channel("eventra-sdk:ee0c38ea");
     sdk.track("one");
     other.postMessage({ type: "queue-add", events: [{ idempotencyKey: "bad", name: "bad", properties: { n: 1n }, timestamp: new Date().toISOString() }] });
     sdk.track("two");

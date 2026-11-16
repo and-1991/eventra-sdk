@@ -90,7 +90,7 @@ test("blocked then unblocked: counters survive a reload and are reported exactly
       .poll(
         async () =>
           page.evaluate(() => {
-            const raw = localStorage.getItem("__eventra_d__");
+            const raw = localStorage.getItem("__eventra_d__9a97f387");
             if (!raw) return 0;
             const r = JSON.parse(raw);
             return (r.counts?.dropped ?? 0) + (r.counts?.failed ?? 0) +
@@ -168,7 +168,7 @@ test("diagnostics: false sends nothing extra, even after failures", async ({ pag
     }, OPTIONS);
     // the queue reaches localStorage on a short debounce; a new instance reads it
     await expect
-      .poll(() => page.evaluate(() => localStorage.getItem("__eventra_q__") !== null), {
+      .poll(() => page.evaluate(() => localStorage.getItem("__eventra_q__9a97f387") !== null), {
         timeout: 2000,
       })
       .toBe(true);
@@ -181,7 +181,7 @@ test("diagnostics: false sends nothing extra, even after failures", async ({ pag
 
     expect(bodies.length).toBeGreaterThan(0);
     expect(bodies.every((b) => b.diagnostics === undefined)).toBe(true);
-    expect(await page.evaluate(() => localStorage.getItem("__eventra_d__"))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("__eventra_d__9a97f387"))).toBeNull();
   } finally {
     server.close();
   }

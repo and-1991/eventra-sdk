@@ -24,14 +24,20 @@ const DEFAULT_ENDPOINT =
 const SDK_VERSION =
   (typeof __SDK_VERSION__ !== "undefined" && __SDK_VERSION__) || "0.0.0-dev";
 
-const LEADER_KEY = "__eventra_leader__";
+// Everything a tracker keeps in localStorage or shares between tabs is named per API key (the name ends with a
+// hash of the key, never the key itself), so two Eventra projects on one site (an app and a third-party widget,
+// say) never send each other's events, and never share a user, a leader tab or delivery counters.
+const LEADER_KEY_PREFIX = "__eventra_leader__";
 const LEADER_TTL_MS = 4000;
-const QUEUE_KEY = "__eventra_q__";
-const DIAGNOSTICS_KEY = "__eventra_d__";
-// the user set by identify(), kept so a reload does not send the first events without it; the key ends with a
-// hash of the API key, so two Eventra projects on one site (a third-party widget, say) never share a user
+const QUEUE_KEY_PREFIX = "__eventra_q__";
+const DIAGNOSTICS_KEY_PREFIX = "__eventra_d__";
+// the user set by identify(), kept so a reload does not send the first events without it
 const USER_KEY_PREFIX = "__eventra_u__";
-const CHANNEL_NAME = "eventra-sdk";
+const CHANNEL_NAME_PREFIX = "eventra-sdk:";
+// up to SDK 2.1.0 one queue held the events of every API key of the site. The first tracker that loads takes
+// what an earlier visit left there (whose key is unknown) and removes it, so those events are delivered once.
+const LEGACY_QUEUE_KEY = "__eventra_q__";
+const LEGACY_DIAGNOSTICS_KEY = "__eventra_d__";
 
 const MAX_EVENT_NAME = 64;
 const MAX_USER_ID = 120;
@@ -651,7 +657,10 @@ class Leader {
   private election?: ReturnType<typeof setInterval>;
   private offStorage?: () => void;
 
-  constructor(private onLeadershipChange?: (isLeader: boolean) => void) {
+  constructor(
+    private readonly key: string,
+    private onLeadershipChange?: (isLeader: boolean) => void,
+  ) {
     if (!storageAvailable()) {
       this.isLeader = true;
       return;
@@ -664,7 +673,7 @@ class Leader {
     // Leader is only constructed in the browser runtime, so `window` exists; listen() still never throws
     /* v8 ignore next */
     this.offStorage = listen(typeof window !== "undefined" ? window : undefined, "storage", (e: StorageEvent) => {
-      if (e.key === LEADER_KEY) this.tick();
+      if (e.key === this.key) this.tick();
     });
   }
 
@@ -705,7 +714,7 @@ class Leader {
   private tryAcquire(): boolean {
     try {
       const now = Date.now();
-      const raw = localStorage.getItem(LEADER_KEY);
+      const raw = localStorage.getItem(this.key);
       if (!raw) {
         this.renew();
         return true;
@@ -727,7 +736,7 @@ class Leader {
 
   private verifyLease(): boolean {
     try {
-      const raw = localStorage.getItem(LEADER_KEY);
+      const raw = localStorage.getItem(this.key);
       if (!raw) return false;
       const parsed = JSON.parse(raw) as { ts: number; tabId: string };
       return (
@@ -741,7 +750,7 @@ class Leader {
   private renew() {
     try {
       localStorage.setItem(
-        LEADER_KEY,
+        this.key,
         JSON.stringify({ ts: Date.now(), tabId: this.tabId }),
       );
     } catch {
@@ -759,11 +768,11 @@ class Leader {
     this.offStorage?.();
     if (this.isLeader && storageAvailable()) {
       try {
-        const raw = localStorage.getItem(LEADER_KEY);
+        const raw = localStorage.getItem(this.key);
         if (raw) {
           const parsed = JSON.parse(raw) as { tabId: string };
           if (parsed.tabId === this.tabId) {
-            localStorage.removeItem(LEADER_KEY);
+            localStorage.removeItem(this.key);
           }
         }
       } catch {
@@ -872,6 +881,8 @@ export class Eventra {
   // Native app. Everything else (Node, edge, Lambda, Deno, Cloudflare Workers) may serve many requests at once.
   private singleUser = false;
   private userKey = USER_KEY_PREFIX;
+  private queueKey = QUEUE_KEY_PREFIX;
+  private keySuffix = "";
   // identifyHint: events without a user id so far, and whether the check is over
   private eventsWithoutUser = 0;
   private identifyHintDone = false;
@@ -925,7 +936,9 @@ export class Eventra {
       }
       this.runtime = detectRuntime();
       this.singleUser = this.runtime === "browser" || isReactNative();
-      this.userKey = `${USER_KEY_PREFIX}${keyHash(options.apiKey)}`;
+      this.keySuffix = keyHash(options.apiKey);
+      this.userKey = `${USER_KEY_PREFIX}${this.keySuffix}`;
+      this.queueKey = `${QUEUE_KEY_PREFIX}${this.keySuffix}`;
       warnIfInsecureEndpoint(this.endpoint);
 
       this.fetch = options.fetchImpl ?? globalThis.fetch?.bind(globalThis);
@@ -954,7 +967,7 @@ export class Eventra {
       const shared = this.runtime === "browser" && this.persistQueue;
       this.diagnostics = new Diagnostics(
         shared ? new SharedStore(this.storage) : new MemoryStore(),
-        DIAGNOSTICS_KEY,
+        `${DIAGNOSTICS_KEY_PREFIX}${this.keySuffix}`,
         uuidV4,
         shared ? () => this.scheduleDiagnosticsSync() : undefined,
       );
@@ -977,7 +990,7 @@ export class Eventra {
       }
 
       if (this.runtime === "browser" && options.multiTabMode === "leader") {
-        this.leader = new Leader((isLeader) => {
+        this.leader = new Leader(`${LEADER_KEY_PREFIX}${this.keySuffix}`, (isLeader) => {
           if (isLeader) void this.flushNow(false);
         });
       }
@@ -1180,7 +1193,10 @@ export class Eventra {
     // be awaited, otherwise `await flush()` resolves while events are in flight
     // and a serverless handler can freeze before they are delivered.
     if (this.flushPromise) await this.flushPromise.catch(() => undefined);
-    return this.flushNow(false);
+    await this.flushNow(false);
+    // what was delivered leaves localStorage before flush() resolves (normally ~50 ms later), so a tracker
+    // created right after it does not find those events and send them again
+    if (this.persistTimer !== undefined) this.persistNow();
   }
 
   // `force` skips only the Retry-After delay (the last chance at shutdown);
@@ -1645,7 +1661,14 @@ export class Eventra {
   }
 
   private loadAndMergeQueue() {
-    const remote = this.storage.get(QUEUE_KEY);
+    const legacy = this.storage.get(LEGACY_QUEUE_KEY);
+    if (Array.isArray(legacy)) {
+      this.storage.remove(LEGACY_QUEUE_KEY);
+      this.storage.remove(LEGACY_DIAGNOSTICS_KEY);
+      this.queue = mergeQueues(this.queue, this.withoutExpired(legacy as TrackEvent[]));
+      this.persistDirty = true;
+    }
+    const remote = this.storage.get(this.queueKey);
     if (Array.isArray(remote)) {
       const fresh = this.withoutExpired(remote as TrackEvent[]);
       // rewrite storage without what was dropped, so it does not come back
@@ -1704,7 +1727,7 @@ export class Eventra {
     if (!this.persistQueue || !this.persistDirty) return;
     this.persistDirty = false;
 
-    const remote = this.storage.get(QUEUE_KEY);
+    const remote = this.storage.get(this.queueKey);
     const merged = mergeQueues(
       Array.isArray(remote)
         ? this.withoutDelivered(this.withoutExpired(remote as TrackEvent[]))
@@ -1712,7 +1735,7 @@ export class Eventra {
       this.queue,
     );
     this.queue = this.trimQueue(merged);
-    this.storage.setRaw(QUEUE_KEY, persistedQueueJson(this.queue));
+    this.storage.setRaw(this.queueKey, persistedQueueJson(this.queue));
   }
 
   private trimQueue(queue: TrackEvent[] = this.queue): TrackEvent[] {
@@ -1769,7 +1792,7 @@ export class Eventra {
   private setupQueueSync() {
     if (typeof BroadcastChannel !== "undefined") {
       try {
-        this.channel = new BroadcastChannel(CHANNEL_NAME);
+        this.channel = new BroadcastChannel(`${CHANNEL_NAME_PREFIX}${this.keySuffix}`);
       } catch {
         // a browser or a sandbox that refuses the channel: tabs just do not share events
         this.channel = undefined;
@@ -1814,7 +1837,7 @@ export class Eventra {
       this.offStorageQueue = listen(window, "storage", (e: StorageEvent) => {
         // another tab called identify() or reset(), or cleared the storage (key null)
         if (e.key === this.userKey || e.key === null) this.userId = this.loadStoredUser();
-        if (e.key !== QUEUE_KEY) return;
+        if (e.key !== this.queueKey) return;
         this.loadAndMergeQueue();
       });
     }

@@ -125,7 +125,7 @@ describe("corrupt persisted queue", () => {
 
   for (const raw of ["[null]", "[1,\"x\",[],{}]", "[{\"name\":\"a\"}]", "{}", "\"str\"", "not json"]) {
     it(`does not throw on stored queue ${raw}`, async () => {
-      env.storage.setItem("__eventra_q__", raw);
+      env.storage.setItem("__eventra_q__ee0c38ea", raw);
       const sent: string[] = [];
       const fetchImpl = (async (_u: string, init?: RequestInit) => {
         sent.push(String(init?.body));
@@ -142,7 +142,7 @@ describe("corrupt persisted queue", () => {
 
   it("keeps valid events and skips junk entries in the same stored queue", async () => {
     env.storage.setItem(
-      "__eventra_q__",
+      "__eventra_q__ee0c38ea",
       JSON.stringify([
         null,
         { idempotencyKey: "11111111-1111-4111-8111-111111111111", name: "good", properties: {}, timestamp: new Date().toISOString() },

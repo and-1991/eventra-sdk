@@ -101,7 +101,7 @@ test.describe("persisted queue in a real browser", () => {
         .poll(
           async () =>
             page.evaluate(() => {
-              const raw = localStorage.getItem("__eventra_q__");
+              const raw = localStorage.getItem("__eventra_q__9a97f387");
               return raw ? JSON.parse(raw).length : 0;
             }),
           { timeout: 2000 },
@@ -131,7 +131,7 @@ test.describe("persisted queue in a real browser", () => {
         .poll(
           async () =>
             page.evaluate(() => {
-              const raw = localStorage.getItem("__eventra_q__");
+              const raw = localStorage.getItem("__eventra_q__9a97f387");
               return raw ? JSON.parse(raw).length : 0;
             }),
           { timeout: 2000 },
@@ -158,7 +158,7 @@ test.describe("persisted queue in a real browser", () => {
         sdk.track("e2e.pagehide");
         // fire right away: a debounced write may not have happened yet
         window.dispatchEvent(new Event("pagehide"));
-        const raw = localStorage.getItem("__eventra_q__");
+        const raw = localStorage.getItem("__eventra_q__9a97f387");
         return raw ? JSON.parse(raw).length : 0;
       }, OPTIONS);
 

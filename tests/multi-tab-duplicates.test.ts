@@ -28,7 +28,7 @@ function tab(extra: Record<string, unknown> = {}) {
 
 function announce(events: Array<{ idempotencyKey: string; name: string }>) {
   const Channel = (globalThis as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel;
-  const other = new Channel("eventra-sdk");
+  const other = new Channel("eventra-sdk:ee0c38ea");
   other.postMessage({ type: "queue-add", events: events.map((e) => ({ ...e, properties: {}, timestamp: new Date().toISOString() })) });
   other.close();
 }
@@ -63,7 +63,7 @@ describe("events another open tab announced", () => {
     const { sdk, calls } = tab();
     announce([{ idempotencyKey: "other-1", name: "theirs" }]);
     const Channel = (globalThis as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel;
-    const other = new Channel("eventra-sdk");
+    const other = new Channel("eventra-sdk:ee0c38ea");
     other.postMessage({ type: "delivered", keys: ["other-1"] });
     other.close();
 
@@ -117,7 +117,7 @@ describe("the record of announced events", () => {
 describe("events read from storage", () => {
   it("are sent at once: they come from an earlier page or a closed tab", async () => {
     env.storage.setItem(
-      "__eventra_q__",
+      "__eventra_q__ee0c38ea",
       JSON.stringify([{ idempotencyKey: "stored-1", name: "from.earlier.page", properties: {}, timestamp: new Date().toISOString() }]),
     );
     const { sdk, calls } = tab();

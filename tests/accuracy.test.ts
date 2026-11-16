@@ -163,7 +163,7 @@ describe("a saved queue is read back only when each event is well formed", () =>
 
   it("keeps the events at every limit and drops the ones past it", async () => {
     env.storage.setItem(
-      "__eventra_q__",
+      "__eventra_q__ee0c38ea",
       JSON.stringify([
         "not an event",
         null,
@@ -270,7 +270,7 @@ describe("open tabs never lose or double an event", () => {
   });
   afterEach(() => env.restore());
 
-  const channel = () => new (globalThis as unknown as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel("eventra-sdk");
+  const channel = () => new (globalThis as unknown as { BroadcastChannel: typeof BroadcastChannel }).BroadcastChannel("eventra-sdk:ee0c38ea");
   const queueOf = (sdk: Eventra) => (sdk as unknown as { queue: SentEvent[] }).queue;
 
   it("keeps an event tracked during a send when another tab delivered part of that batch", async () => {

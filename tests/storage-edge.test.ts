@@ -3,8 +3,8 @@ import { Eventra } from "../src";
 import { createMockFetch } from "./helpers/mockFetch";
 import { installBrowserEnv, type BrowserEnvHandle } from "./helpers/browserEnv";
 
-const QUEUE_KEY = "__eventra_q__";
-const CHANNEL_NAME = "eventra-sdk";
+const QUEUE_KEY = "__eventra_q__ee0c38ea";
+const CHANNEL_NAME = "eventra-sdk:ee0c38ea";
 
 let env: BrowserEnvHandle;
 let active: Eventra[] = [];

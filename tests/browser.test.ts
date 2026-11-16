@@ -44,8 +44,8 @@ describe("browser mode", () => {
     sdk.track("page.viewed");
 
     // writes are coalesced into one short debounce, not done per track() call
-    await vi.waitFor(() => expect(env.storage.getItem("__eventra_q__")).toBeTruthy());
-    const raw = env.storage.getItem("__eventra_q__");
+    await vi.waitFor(() => expect(env.storage.getItem("__eventra_q__ee0c38ea")).toBeTruthy());
+    const raw = env.storage.getItem("__eventra_q__ee0c38ea");
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw as string);
     expect(parsed.map((e: { name: string }) => e.name)).toEqual([
@@ -57,7 +57,7 @@ describe("browser mode", () => {
   it("recovers queued events from localStorage on a fresh instance", async () => {
     // pre-populate a queue from a previous session
     env.storage.setItem(
-      "__eventra_q__",
+      "__eventra_q__ee0c38ea",
       JSON.stringify([
         {
           idempotencyKey: "11111111-1111-4111-8111-111111111111",
@@ -98,7 +98,7 @@ describe("browser mode", () => {
     // simulate sibling tab broadcasting its queue
     const ChannelCtor = (globalThis as { BroadcastChannel: typeof BroadcastChannel })
       .BroadcastChannel;
-    const sibling = new ChannelCtor("eventra-sdk");
+    const sibling = new ChannelCtor("eventra-sdk:ee0c38ea");
     const dupeKey = "22222222-2222-4222-8222-222222222222";
     sibling.postMessage({
       type: "queue-sync",
@@ -183,13 +183,13 @@ describe("browser mode", () => {
     sdk.track("user.signup", { userId: "user_123", properties: { plan: "pro" } });
     await sdk.flush(); // delivery fails (500) — event stays queued in memory
 
-    expect(env.storage.getItem("__eventra_q__")).toBeNull();
+    expect(env.storage.getItem("__eventra_q__ee0c38ea")).toBeNull();
     expect(calls.length).toBe(1);
   });
 
   it("persistQueue: false does not recover a queue left by a previous session", async () => {
     env.storage.setItem(
-      "__eventra_q__",
+      "__eventra_q__ee0c38ea",
       JSON.stringify([
         {
           idempotencyKey: "11111111-1111-4111-8111-111111111111",
@@ -229,7 +229,7 @@ describe("browser mode", () => {
 
     const ChannelCtor = (globalThis as { BroadcastChannel: typeof BroadcastChannel })
       .BroadcastChannel;
-    const sibling = new ChannelCtor("eventra-sdk");
+    const sibling = new ChannelCtor("eventra-sdk:ee0c38ea");
     sibling.postMessage({
       type: "queue-sync",
       events: [
@@ -246,7 +246,7 @@ describe("browser mode", () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + 16_000);
     await sdk.flush();
     vi.restoreAllMocks();
-    expect(env.storage.getItem("__eventra_q__")).toBeNull();
+    expect(env.storage.getItem("__eventra_q__ee0c38ea")).toBeNull();
     expect(calls[0]?.body.events.map((e) => e.name).sort()).toEqual([
       "local.a",
       "remote.b",
@@ -265,14 +265,14 @@ describe("browser mode", () => {
     active.push(sdk);
 
     // a single instance becomes leader immediately
-    const lease = env.storage.getItem("__eventra_leader__");
+    const lease = env.storage.getItem("__eventra_leader__ee0c38ea");
     expect(lease).toBeTruthy();
   });
 
   it("blocks flush in 'leader' mode when another tab owns the lease", async () => {
     // pre-occupy the lease with a fresh ts and a different tabId
     env.storage.setItem(
-      "__eventra_leader__",
+      "__eventra_leader__ee0c38ea",
       JSON.stringify({ tabId: "other-tab", ts: Date.now() }),
     );
 
